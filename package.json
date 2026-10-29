@@ -1,0 +1,9 @@
+{
+  "name": "azurpilot-template-distribution",
+  "private": true,
+  "scripts": {
+    "worker:dry-run": "wrangler deploy --dry-run --config worker/wrangler.jsonc",
+    "worker:dev": "wrangler dev --config worker/wrangler.jsonc --port 8787"
+  },
+  "devDependencies": { "wrangler": "^4" }
+}

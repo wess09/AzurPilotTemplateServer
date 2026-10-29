@@ -1,0 +1,280 @@
+import base64
+import json
+import secrets
+from datetime import UTC, datetime
+
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from .imaging import Icon, match_icon
+from .models import (
+    CoordinationLock,
+    IconImage,
+    Mapping,
+    MappingDraft,
+    OutboxEvent,
+    PublishRequest,
+    Release,
+    State,
+    TemplateIdentity,
+)
+
+
+def utcnow():
+    return datetime.now(UTC)
+
+
+def fields(row, *names):
+    return {name: getattr(row, name) for name in names}
+
+
+class DomainError(Exception):
+    def __init__(self, message: str, status: int = 409):
+        self.message = message
+        self.status = status
+
+
+def lock(session: Session, number: int, *, skip_locked: bool = False):
+    return session.scalar(
+        select(CoordinationLock).where(CoordinationLock.id == number).with_for_update(skip_locked=skip_locked)
+    )
+
+
+def emit(session: Session, event_type: str, revision: int, payload: dict):
+    session.add(OutboxEvent(event_type=event_type, revision=revision, payload=payload))
+
+
+def database_url(url: str):
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+    if not url.startswith("postgresql+psycopg://"):
+        raise ValueError("The template service requires PostgreSQL")
+    return url
+
+
+class Store:
+    def __init__(self, url: str):
+        self.engine = create_engine(
+            database_url(url), pool_pre_ping=True, pool_size=8, max_overflow=8, hide_parameters=True
+        )
+        self.session = sessionmaker(self.engine, expire_on_commit=False)
+
+    def open(self):
+        with self.session() as session:
+            locks = set(session.scalars(select(CoordinationLock.id)))
+            if session.get(State, 1) is None or not {1, 2, 3}.issubset(locks):
+                raise RuntimeError("Run alembic upgrade head before starting the service")
+
+    def close(self):
+        self.engine.dispose()
+
+    def ingest(self, icon: Icon, formal: dict | None = None) -> dict:
+        with self.session.begin() as session:
+            lock(session, 1)
+            image = session.get(IconImage, icon.sha256)
+            identity = session.get(TemplateIdentity, image.identity_id) if image else None
+            if formal:
+                if identity and identity.canonical_id != formal["item_id"]:
+                    raise DomainError(f"Icon already belongs to {identity.id}; create a mapping instead")
+                if not identity:
+                    identity = session.get(TemplateIdentity, formal["item_id"])
+            elif not identity:
+                rows = session.execute(
+                    select(IconImage, TemplateIdentity).join(
+                        TemplateIdentity, TemplateIdentity.id == IconImage.identity_id
+                    )
+                ).all()
+                candidates = [
+                    {
+                        **fields(target, "id", "canonical_id", "kind"),
+                        **fields(sample, "pixels", "phash", "mean", "stddev"),
+                    }
+                    for sample, target in rows
+                ]
+                matched = match_icon(icon, candidates)
+                identity = session.get(TemplateIdentity, matched["id"]) if matched else None
+            created = identity is None
+            if created:
+                identity_id = formal["item_id"] if formal else "U-" + secrets.token_hex(6).upper()
+                if not formal:
+                    while session.get(TemplateIdentity, identity_id):
+                        identity_id = "U-" + secrets.token_hex(6).upper()
+                identity = TemplateIdentity(
+                    id=identity_id,
+                    canonical_id=identity_id,
+                    name=formal["name"] if formal else "",
+                    tag=formal.get("tag", "") if formal else "",
+                    kind="formal" if formal else "temporary",
+                )
+                session.add(identity)
+                session.flush()
+            else:
+                identity.hits += 1
+                identity.last_seen = utcnow()
+            count = session.scalar(
+                select(func.count()).select_from(IconImage).where(IconImage.identity_id == identity.id)
+            )
+            state = session.get(State, 1)
+            if image is None and (formal is not None or count < 8):
+                session.add(
+                    IconImage(
+                        identity_id=identity.id,
+                        **fields(icon, "sha256", "png", "pixels", "phash", "mean", "stddev"),
+                    )
+                )
+                state.generation += 1
+            if created:
+                emit(
+                    session,
+                    "template.registered",
+                    state.revision,
+                    {
+                        "template_id": identity.canonical_id,
+                        "kind": identity.kind,
+                        "generation": state.generation,
+                    },
+                )
+            return {
+                "match": "formal" if identity.kind == "formal" else ("new" if created else "cluster"),
+                "template_id": identity.canonical_id,
+                "identity_id": identity.id,
+                "item_id": identity.canonical_id if identity.kind == "formal" else None,
+                "name": identity.name,
+                "tag": identity.tag,
+                "revision": state.revision,
+                "publication_pending": state.generation > state.published_generation,
+            }
+
+    def save_mapping(self, unknown_id: str, body: dict):
+        with self.session.begin() as session:
+            lock(session, 1)
+            if not unknown_id.startswith("U-") or not session.get(TemplateIdentity, unknown_id):
+                raise DomainError("Unknown template ID does not exist", 404)
+            session.merge(MappingDraft(unknown_id=unknown_id, updated_at=utcnow(), **body))
+
+    def request_publish(self, note: str):
+        with self.session.begin() as session:
+            lock(session, 1)
+            drafts = session.scalars(select(MappingDraft).order_by(MappingDraft.unknown_id))
+            request = PublishRequest(
+                note=note, mappings=[fields(d, "unknown_id", "item_id", "name", "tag") for d in drafts]
+            )
+            session.add(request)
+            session.flush()
+            return request.id
+
+    def status(self):
+        with self.session() as session:
+            state = fields(session.get(State, 1), "generation", "published_generation", "revision")
+            state["templates"] = [
+                dict(row._mapping)
+                for row in session.execute(
+                    select(TemplateIdentity.kind, func.count().label("count")).group_by(TemplateIdentity.kind)
+                )
+            ]
+            state["drafts"] = session.scalar(select(func.count()).select_from(MappingDraft))
+            state["pending_events"] = session.scalar(
+                select(func.count()).select_from(OutboxEvent).where(OutboxEvent.acknowledged_at.is_(None))
+            )
+            state["pending_publications"] = session.scalar(
+                select(func.count()).select_from(PublishRequest).where(PublishRequest.processed.is_(False))
+            )
+            event = session.scalar(select(OutboxEvent).order_by(OutboxEvent.sequence.desc()).limit(1))
+            state["last_delivery"] = (
+                fields(event, "sequence", "acknowledged_at", "last_error", "attempts") if event else None
+            )
+            release = session.scalar(select(Release).order_by(Release.revision.desc()).limit(1))
+            state["release"] = (
+                fields(release, "revision", "status", "error", "created_at", "deployed_at")
+                if release
+                else None
+            )
+            return state
+
+    def templates(self, kind: str | None, limit: int, offset: int):
+        with self.session() as session:
+            statement = select(TemplateIdentity).order_by(
+                TemplateIdentity.created_at.desc(), TemplateIdentity.id
+            )
+            if kind:
+                statement = statement.where(TemplateIdentity.kind == kind)
+            result = []
+            for row in session.scalars(statement.limit(limit).offset(offset)):
+                item = fields(
+                    row, "id", "canonical_id", "name", "tag", "kind", "hits", "created_at", "last_seen"
+                )
+                draft = session.get(MappingDraft, row.id)
+                item["draft"] = fields(draft, "item_id", "name", "tag") if draft else None
+                image = session.scalar(
+                    select(IconImage)
+                    .where(IconImage.identity_id == row.id)
+                    .order_by(IconImage.created_at, IconImage.sha256)
+                    .limit(1)
+                )
+                item["icon_sha256"] = image.sha256 if image else None
+                item["image_base64"] = base64.b64encode(image.png).decode() if image else None
+                result.append(item)
+            return result
+
+    def icon_png(self, sha256: str):
+        with self.session() as session:
+            return session.scalar(select(IconImage.png).where(IconImage.sha256 == sha256))
+
+    def releases(self):
+        with self.session() as session:
+            return [
+                fields(row, "revision", "status", "request_id", "note", "error", "created_at", "deployed_at")
+                for row in session.scalars(select(Release).order_by(Release.revision.desc()).limit(100))
+            ]
+
+    def events(self, after: int):
+        with self.session() as session:
+            result = []
+            for row in session.scalars(
+                select(OutboxEvent)
+                .where(OutboxEvent.sequence > after)
+                .order_by(OutboxEvent.sequence)
+                .limit(100)
+            ):
+                event = fields(row, "sequence", "event_id", "revision", "payload", "created_at")
+                event["type"] = row.event_type
+                result.append(event)
+            return result
+
+
+def snapshot(session: Session, approved: list[dict]) -> dict:
+    mappings = {
+        row.unknown_id: fields(row, "unknown_id", "item_id", "name", "tag")
+        for row in session.scalars(select(Mapping))
+    }
+    mappings.update({row["unknown_id"]: row for row in approved})
+    templates = []
+    rows = session.execute(
+        select(IconImage, TemplateIdentity)
+        .join(TemplateIdentity, IconImage.identity_id == TemplateIdentity.id)
+        .order_by(TemplateIdentity.id, IconImage.sha256)
+    )
+    for icon, identity in rows:
+        mapping = mappings.get(identity.id)
+        templates.append(
+            {
+                "identity_id": identity.id,
+                "template_id": mapping["item_id"] if mapping else identity.canonical_id,
+                "kind": "formal" if mapping else identity.kind,
+                "name": mapping["name"] if mapping else identity.name,
+                "tag": mapping["tag"] if mapping else identity.tag,
+                "icon_sha256": icon.sha256,
+                "image_base64": base64.b64encode(icon.png).decode(),
+            }
+        )
+    return {
+        "templates": templates,
+        "mappings": sorted(mappings.values(), key=lambda row: row["unknown_id"]),
+        "approved": approved,
+    }
+
+
+def json_bytes(value) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

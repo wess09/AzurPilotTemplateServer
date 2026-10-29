@@ -1,0 +1,35 @@
+[project]
+name = "azurpilot-template-server"
+version = "0.1.0"
+description = "Independent template identity, mapping and static distribution service"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "psycopg[binary]>=3.2,<4",
+  "sqlalchemy>=2.0,<3",
+  "alembic>=1.15,<2",
+  "numpy>=2,<3",
+  "opencv-python-headless>=4.10,<5",
+  "cryptography>=44",
+  "httpx>=0.28,<1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.11"]
+
+[project.scripts]
+template-server = "templateserver.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["templateserver"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
