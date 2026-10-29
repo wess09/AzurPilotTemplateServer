@@ -99,4 +99,4 @@
 
 其他事件为 `template.registered`、`release.failed`。注册事件只更新状况，不能把未发布草稿当成正式映射。
 
-主服务器提交事件与映射事务后返回 `{"ack":"<相同 event_id>"}`。没有精确 ack 就持续保留并重试。事件按序交付，失败指数退避最多 300 秒；重复事件幂等，同 ID 不同正文拒绝，旧 revision 不覆盖新映射。需要审计／补拉时可带事件令牌访问 `GET /internal/v1/templates/events?after=<sequence>`。
+主服务器提交事件与映射事务后返回 `{"ack":"<相同 event_id>"}`。没有精确 ack 就持续保留并重试。事件按序交付，失败指数退避最多 256 秒；重复事件幂等，同 ID 不同正文拒绝，旧 revision 不覆盖新映射。需要审计／补拉时可带事件令牌访问 `GET /internal/v1/templates/events?after=<sequence>`。

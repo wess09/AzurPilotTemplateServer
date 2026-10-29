@@ -57,3 +57,35 @@ TEMPLATE_PUBLIC_BASE=https://templates.example.com
 - 客户端更新失败：不提交本地版本，下一次重放同一已签名映射；正式数据更新需由客户端事务保证。
 
 当前代码不实现客户端本地数据库写入器，不要求重新上传或废弃旧统计数据。
+
+## NAT 生产部署
+
+本次部署使用以下固定入口：
+
+- 模板 API：`https://templates-api.azurpilot.com`，NAT 机映射到 HTTP 8090。
+- 静态分发：`https://templates.azurpilot.com`，由 Cloudflare Worker 提供资源。
+- 主服务器事件接收：`https://api.azurpilot.com/internal/v1/templates/events`。
+
+生产服务目录为 `/srv/azurpilot-template-service`，配置与三个服务间令牌保存在该目录的 `.env`（权限 600），签名私钥位于 `data/signing.key`。主服务器保留自己的管理员登录令牌；浏览器不接触模板服务的内部令牌。
+
+小内存 NAT 机可以使用 `compose.production.yml`，复用已有 PostgreSQL 实例，但使用独立数据库。`DATABASE_URL` 指向新库；`TEMPLATE_DB_NETWORK` 指向数据库所在的外部 Docker 网络，不能直接复用旧表结构。本次按用户要求清空主服务器和模板服务器的旧业务数据，以空库重新部署。
+
+```sh
+docker compose -f compose.production.yml up -d --no-build
+```
+
+先设置 `TEMPLATE_PUBLISHED_PORT=127.0.0.1:18093` 做本机验证，再改为 `8090` 并停止旧 API 容器后切换。`TEMPLATE_IMAGE` 指定已构建的镜像。不要同时让两个服务争用 8090，也不要停止被新服务复用的 PostgreSQL 容器。
+
+本次是完整重置：不迁移旧模板、旧映射或旧发布记录，使用新的签名密钥，从 revision 1 重新发布 Worker 资源。客户端需使用本次新公钥；常规升级仍应保持版本单调递增和签名密钥稳定。
+
+Wrangler 在可写的数据目录执行；运行用户的 HOME 位于 `/home/templates`，避免非 root 容器向只读应用目录写缓存。镜像基础层固定到已验证的 SHA-256。
+
+容器在迁移完成后通过 `exec` 让 Python 服务成为 PID 1，以正确接收停止信号；本次生产实测重启 1.88 秒，重启后 revision 与签名公钥保持不变。
+
+当前生产验签公钥（Ed25519 原始 32 字节，Base64）：
+
+```text
+r1HA3vwbOo1v4cDtrU5yJNAKZXuvmW8ot6cXeBC9IN4=
+```
+
+本次线上验证包括：空模板库 revision 1、Worker 签名与 manifest SHA-256、ETag/304、未授权上传 401、非法图标 400、重复事件精确 ack、主服务器统一管理代理及待同步事件为 0。未向生产库写入演示模板或演示统计。

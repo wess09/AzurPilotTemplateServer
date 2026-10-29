@@ -1,0 +1,35 @@
+name: azurpilot-template-identity
+services:
+  api:
+    image: ${TEMPLATE_IMAGE:-azurpilot-template-identity:local}
+    build: .
+    restart: unless-stopped
+    command: ["sh", "-c", "/app/.venv/bin/alembic upgrade head && exec /app/.venv/bin/template-server"]
+    env_file: .env
+    environment:
+      LISTEN_HOST: 0.0.0.0
+      PORT: '8090'
+      DATA_DIR: /app/data
+    ports:
+      - "${TEMPLATE_PUBLISHED_PORT:-8090}:8090"
+    volumes:
+      - ./data:/app/data
+    networks:
+      - template-database
+    mem_limit: ${TEMPLATE_MEMORY_LIMIT:-640m}
+    cpus: 1.0
+    stop_grace_period: 240s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    healthcheck:
+      test: ["CMD", "uv", "run", "--no-sync", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+networks:
+  template-database:
+    external: true
+    name: ${TEMPLATE_DB_NETWORK:-azurpilot-templates_default}

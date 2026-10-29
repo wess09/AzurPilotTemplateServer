@@ -210,6 +210,7 @@ class Publisher:
                 str(config_path.resolve()),
             ],
             timeout=180,
+            cwd=self.config.data_dir,
             capture_output=True,
             check=False,
         )

@@ -1,5 +1,5 @@
 FROM node:22-bookworm-slim AS node
-FROM ghcr.io/astral-sh/uv:0.11.32-python3.13-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
 WORKDIR /app
@@ -13,6 +13,6 @@ COPY migrations ./migrations
 COPY alembic.ini ./
 RUN uv sync --frozen --no-dev && useradd --uid 10001 --create-home templates && mkdir data && chown templates:templates data
 USER templates
-ENV LISTEN_HOST=0.0.0.0 PORT=8093
+ENV HOME=/home/templates WRANGLER_SEND_METRICS=false LISTEN_HOST=0.0.0.0 PORT=8093
 EXPOSE 8093
-CMD ["sh", "-c", "uv run --no-sync alembic upgrade head && uv run --no-sync template-server"]
+CMD ["sh", "-c", "/app/.venv/bin/alembic upgrade head && exec /app/.venv/bin/template-server"]

@@ -5,6 +5,9 @@ data
 node_modules
 __pycache__
 .env
+*.env
+backups/
+*.log
 .pytest_cache
 .ruff_cache
 test-results
