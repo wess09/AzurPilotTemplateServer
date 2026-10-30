@@ -64,6 +64,24 @@ def decode_icon(encoded: str, *, allow_cell: bool = False) -> Icon:
 THRESHOLDS = {"formal": 0.92, "cluster": 0.96, "margin": 0.03, "phash_distance": 6, "color": 30}
 
 
+def decode_screenshot(encoded: str) -> tuple[str, bytes]:
+    """Validate dimensions before decoding; preserve the original PNG bytes and resolution."""
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Expected base64 PNG screenshot") from exc
+    if len(raw) > 4 * 1024 * 1024:
+        raise ValueError("Screenshot exceeds 4 MiB")
+    if len(raw) < 33 or raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR":
+        raise ValueError("Only PNG screenshots are accepted")
+    if struct.unpack(">II", raw[16:24]) != (1280, 720):
+        raise ValueError("Expected a complete 1280x720 game screenshot")
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+    if image is None or image.shape != (720, 1280, 3) or image.dtype != np.uint8:
+        raise ValueError("Expected an 8-bit RGB screenshot")
+    return hashlib.sha256(raw).hexdigest(), raw
+
+
 def match_icon(icon: Icon, rows: list[dict], thresholds: dict | None = None) -> dict | None:
     limits = thresholds or THRESHOLDS
     query = np.frombuffer(icon.pixels, np.uint8).reshape(49, 49, 3)

@@ -31,7 +31,26 @@
 
 `match` 为 `new`、`cluster`、`formal`。正式命中直接返回正式 `template_id`；`identity_id` 保留服务器原始身份，可能是旧 U-ID。pHash 只用于筛选，不能充当唯一编号。模板接受严格的 49×49 不透明 RGB/RGBA PNG，正式导入另支持 96×96 物品格，裁剪 `(40,21)-(89,70)`。
 
-批量接口为 `POST /api/v3/post/unknown-candidates`，正文 `{candidates:[...]}`，最多 50 项／256KiB；单图接口最多 512KiB。服务端在解码前检查尺寸和请求体大小。429 携带 `Retry-After`。场景不是统计业务白名单，不上传整张截图或事件行。
+批量接口为 `POST /api/v3/post/unknown-candidates`，正文 `{candidates:[...]}`，最多 50 项／256KiB；单图接口最多 512KiB。服务端在解码前检查尺寸和请求体大小。429 携带 `Retry-After`。这些接口只接受图标；原图使用下面的独立接口。
+
+## 未知物品完整原图
+
+客户端直接调用 `POST https://templates-api.azurpilot.com/api/v3/post/templates/screenshots`，无需共享凭据，使用相同的客户端限流。正文为：
+
+```json
+{
+  "image_base64": "<完整 1280x720 RGB PNG base64>",
+  "scene": "research",
+  "client": "AzurPilot",
+  "references": [{"identity_id": "U-1A2B3C4D5E6F", "bounds": [100, 200, 196, 296]}]
+}
+```
+
+原始 PNG 最大 4 MiB、请求体最大 6 MiB，每张图最多关联 100 个物品位置。先注册图标，取得 `identity_id` 后再上传截图。坐标为完整截图中的物品格位置。响应 `{stored:true,sha256:"..."}` 中的哈希针对上传的原始 PNG 文件；服务端保留原始字节。相同截图只保存一次，重复关联幂等。
+
+客户端将原图和待关联物品持久化，失败后重试、重启续传。即使本地已命中临时 U-ID，只要仍未正式映射，也会保存其完整奖励截图。正式已知物品不触发原图上传。原图只存独立模板数据库，由认证的模板管理 WebSocket 按需读取，不进入公开 Worker 资源包，也不推送或代理到主服务器。
+
+旧版只上传过小图的历史模板不能还原原图；新版客户端再次遇到它时自动补传。管理列表的 `screenshot_count` 显示已有原图数。
 
 ## 资源下载与验签
 
@@ -106,6 +125,10 @@
 | `publish` | 可选 `note`，返回排队任务 ID |
 | `releases.list` | 空对象 |
 | `icons.get` | `sha256`，返回 base64 图标 |
+| `screenshots.list` | `identity_id`，可选 `limit` 1–50 默认10、`offset`；返回原图哈希、时间、场景、1280×720 尺寸和物品 `bounds` |
+| `screenshots.get` | `sha256`，可选 `offset` 字节偏移、`length` 最大192 KiB；返回 `data_base64,offset,total_size,media_type` |
+
+管理前端通过模板 WebSocket 分块读取原图，拼接后校验完整文件 SHA-256，支持位置标记、打开完整原图和下载 PNG。没有公开截图 GET 端点。
 
 主服务单帧上限 64 KiB、每连接每秒10个命令/突发50、最多4个并行命令，单次最长100秒。模板服务单帧上限512 KiB、每连接每秒10个命令/突发50，顺序执行命令。状态变化通过连接推送，页面不做 HTTP 轮询。公开统计页面的 HTTP 请求不携带管理凭据。
 

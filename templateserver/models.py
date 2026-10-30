@@ -65,6 +65,25 @@ class IconImage(Base):
     __table_args__ = (CheckConstraint(func.octet_length(pixels) == 7203, name="icon_pixel_length"),)
 
 
+class Screenshot(Base):
+    __tablename__ = "screenshots"
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    png: Mapped[bytes] = mapped_column(LargeBinary)
+    scene: Mapped[str] = mapped_column(String(64))
+    client: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ScreenshotReference(Base):
+    __tablename__ = "screenshot_references"
+    screenshot_sha256: Mapped[str] = mapped_column(ForeignKey("screenshots.sha256"), primary_key=True)
+    identity_id: Mapped[str] = mapped_column(ForeignKey("identities.id"), primary_key=True, index=True)
+    x1: Mapped[int] = mapped_column(Integer, primary_key=True)
+    y1: Mapped[int] = mapped_column(Integer, primary_key=True)
+    x2: Mapped[int] = mapped_column(Integer, primary_key=True)
+    y2: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
 class MappingDraft(Base):
     __tablename__ = "mapping_drafts"
     unknown_id: Mapped[str] = mapped_column(ForeignKey("identities.id"), primary_key=True)

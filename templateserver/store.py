@@ -15,6 +15,8 @@ from .models import (
     OutboxEvent,
     PublishRequest,
     Release,
+    Screenshot,
+    ScreenshotReference,
     State,
     TemplateIdentity,
 )
@@ -154,6 +156,84 @@ class Store:
                 raise DomainError("Unknown template ID does not exist", 404)
             session.merge(MappingDraft(unknown_id=unknown_id, updated_at=utcnow(), **body))
 
+    def save_screenshot(self, digest: str, png: bytes, scene: str, client: str, references: list[dict]):
+        with self.session.begin() as session:
+            lock(session, 1)
+            for reference in references:
+                if session.get(TemplateIdentity, reference["identity_id"]) is None:
+                    raise DomainError("Register every template before uploading its screenshot", 404)
+            if session.get(Screenshot, digest) is None:
+                session.add(Screenshot(sha256=digest, png=png, scene=scene, client=client))
+                session.flush()
+            for reference in references:
+                key = (digest, reference["identity_id"], *reference["bounds"])
+                if session.get(ScreenshotReference, key) is None:
+                    session.add(
+                        ScreenshotReference(
+                            **dict(
+                                zip(
+                                    ("screenshot_sha256", "identity_id", "x1", "y1", "x2", "y2"),
+                                    key,
+                                    strict=True,
+                                )
+                            )
+                        )
+                    )
+                    session.flush()
+        # Evidence is private administration data, never a release asset or main-server event.
+        return {"sha256": digest, "stored": True}
+
+    def screenshots(self, identity_id: str, limit: int, offset: int):
+        with self.session() as session:
+            if session.get(TemplateIdentity, identity_id) is None:
+                raise DomainError("Template not found", 404)
+            rows = session.execute(
+                select(
+                    Screenshot.sha256,
+                    Screenshot.scene,
+                    Screenshot.created_at,
+                    ScreenshotReference.x1,
+                    ScreenshotReference.y1,
+                    ScreenshotReference.x2,
+                    ScreenshotReference.y2,
+                )
+                .join(ScreenshotReference, ScreenshotReference.screenshot_sha256 == Screenshot.sha256)
+                .where(ScreenshotReference.identity_id == identity_id)
+                .order_by(
+                    Screenshot.created_at.desc(),
+                    Screenshot.sha256,
+                    ScreenshotReference.x1,
+                    ScreenshotReference.y1,
+                )
+                .limit(limit)
+                .offset(offset)
+            )
+            return [
+                {
+                    "sha256": row.sha256,
+                    "scene": row.scene,
+                    "created_at": row.created_at,
+                    "width": 1280,
+                    "height": 720,
+                    "bounds": [row.x1, row.y1, row.x2, row.y2],
+                }
+                for row in rows
+            ]
+
+    def screenshot_chunk(self, digest: str, offset: int, length: int):
+        with self.session() as session:
+            png = session.scalar(select(Screenshot.png).where(Screenshot.sha256 == digest))
+            if png is None:
+                raise DomainError("Screenshot not found", 404)
+            if offset >= len(png):
+                raise DomainError("Screenshot offset is outside the image", 422)
+            return {
+                "data_base64": base64.b64encode(png[offset : offset + length]).decode(),
+                "offset": offset,
+                "total_size": len(png),
+                "media_type": "image/png",
+            }
+
     def request_publish(self, note: str):
         with self.session.begin() as session:
             lock(session, 1)
@@ -177,6 +257,8 @@ class Store:
             state["drafts"] = session.scalar(select(func.count()).select_from(MappingDraft))
             state["last_draft_updated_at"] = session.scalar(select(func.max(MappingDraft.updated_at)))
             state["last_activity"] = session.scalar(select(func.max(TemplateIdentity.last_seen)))
+            state["screenshots"] = session.scalar(select(func.count()).select_from(Screenshot))
+            state["last_screenshot_at"] = session.scalar(select(func.max(Screenshot.created_at)))
             state["total_hits"] = session.scalar(select(func.coalesce(func.sum(TemplateIdentity.hits), 0)))
             state["pending_events"] = session.scalar(
                 select(func.count()).select_from(OutboxEvent).where(OutboxEvent.acknowledged_at.is_(None))
@@ -204,7 +286,18 @@ class Store:
             if kind:
                 statement = statement.where(TemplateIdentity.kind == kind)
             result = []
-            for row in session.scalars(statement.limit(limit).offset(offset)):
+            rows = list(session.scalars(statement.limit(limit).offset(offset)))
+            counts = dict(
+                session.execute(
+                    select(
+                        ScreenshotReference.identity_id,
+                        func.count(func.distinct(ScreenshotReference.screenshot_sha256)),
+                    )
+                    .where(ScreenshotReference.identity_id.in_([row.id for row in rows]))
+                    .group_by(ScreenshotReference.identity_id)
+                ).all()
+            )
+            for row in rows:
                 item = fields(
                     row, "id", "canonical_id", "name", "tag", "kind", "hits", "created_at", "last_seen"
                 )
@@ -218,6 +311,7 @@ class Store:
                 )
                 item["icon_sha256"] = image.sha256 if image else None
                 item["image_base64"] = base64.b64encode(image.png).decode() if image else None
+                item["screenshot_count"] = counts.get(row.id, 0)
                 result.append(item)
             return result
 

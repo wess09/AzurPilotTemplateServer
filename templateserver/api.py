@@ -14,9 +14,9 @@ from fastapi.responses import JSONResponse
 from .admin import AdminSocket
 from .config import Config
 from .delivery import Delivery
-from .imaging import decode_icon
+from .imaging import decode_icon, decode_screenshot
 from .publishing import Publisher
-from .schemas import UnknownBatch, UnknownUpload
+from .schemas import ScreenshotUpload, UnknownBatch, UnknownUpload
 from .store import DomainError, Store
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,8 @@ class BodyLimit:
             return await self.app(scope, receive, send)
         chunks, size = [], 0
         limit = 256 * 1024 if scope["path"].endswith("unknown-candidates") else 512 * 1024
+        if scope["path"] == "/api/v3/post/templates/screenshots":
+            limit = 6 * 1024 * 1024
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
@@ -195,6 +197,13 @@ def create_app(
         return {
             "results": [upload_result(row, icon) for row, icon in zip(body.candidates, icons, strict=True)]
         }
+
+    @app.post("/api/v3/post/templates/screenshots", dependencies=[Depends(ingest_limit)])
+    def screenshot(body: ScreenshotUpload):
+        digest, png = decode_screenshot(body.image_base64)
+        return store.save_screenshot(
+            digest, png, body.scene, body.client, [row.model_dump() for row in body.references]
+        )
 
     @app.get("/internal/v1/templates/events", dependencies=[Depends(event_auth)])
     def events(after: int = Query(default=0, ge=0)):

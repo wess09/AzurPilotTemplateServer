@@ -75,6 +75,11 @@ Worker 使用 [Static Assets](https://developers.cloudflare.com/workers/static-a
 
 ## 接入主服务器与客户端
 
+未知物品还支持完整 1280×720 奖励截图：客户端直传模板服务，数据库按文件哈希去重，
+关联各个 U-ID 和物品格坐标。后台通过认证的模板 WebSocket 分块读取原图，支持位置
+标记和原始 PNG 下载；截图不会进入主服务器或公开 Worker 资源包。端点及管理命令见
+[原图协议](docs/protocol.md#未知物品完整原图)。
+
 详见 [协议](docs/protocol.md) 和 [部署配置](docs/integration.md)。配套主服务器仓库为 `AzurPillotCloudServer`：仅保留事件接收和同面板的直连管理页面，复用现有后台登录凭据；该仓库里的旧 `cmd/templateserver` 不参与本服务部署。
 
 本项目提供客户端资源协议及验签函数，**没有修改游戏客户端源码**。客户端需按协议在本地事务中同时应用 `replace_ids` 和模板替换；这是客户端负责的数据库操作。

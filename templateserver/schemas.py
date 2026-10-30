@@ -20,6 +20,28 @@ class UnknownBatch(StrictModel):
     candidates: list[UnknownUpload] = Field(min_length=1, max_length=50)
 
 
+class ScreenshotReferenceBody(StrictModel):
+    identity_id: str = Field(min_length=1, max_length=128)
+    bounds: tuple[int, int, int, int]
+
+    @field_validator("bounds", mode="before")
+    @classmethod
+    def validate_bounds(cls, value):
+        if not isinstance(value, (list, tuple)) or len(value) != 4 or any(type(v) is not int for v in value):
+            raise ValueError("Expected four integer coordinates")
+        x1, y1, x2, y2 = value
+        if not (0 <= x1 < x2 <= 1280 and 0 <= y1 < y2 <= 720):
+            raise ValueError("Item bounds must lie inside the screenshot")
+        return tuple(value)
+
+
+class ScreenshotUpload(StrictModel):
+    image_base64: str = Field(max_length=5_592_408)
+    references: list[ScreenshotReferenceBody] = Field(min_length=1, max_length=100)
+    scene: str = Field(max_length=64)
+    client: str = Field(default="", max_length=64)
+
+
 class MappingBody(StrictModel):
     item_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=128)

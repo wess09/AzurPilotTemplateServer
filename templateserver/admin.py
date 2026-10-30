@@ -43,6 +43,17 @@ class ReadIcon(StrictModel):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class ListScreenshots(StrictModel):
+    identity_id: str = Field(min_length=1, max_length=128)
+    limit: int = Field(default=10, ge=1, le=50)
+    offset: int = Field(default=0, ge=0)
+
+
+class ReadScreenshot(ReadIcon):
+    offset: int = Field(default=0, ge=0, lt=4 * 1024 * 1024)
+    length: int = Field(default=192 * 1024, ge=1, le=192 * 1024)
+
+
 class AdminSocket:
     def __init__(self, store, publisher, config):
         self.store, self.publisher, self.config = store, publisher, config
@@ -89,6 +100,12 @@ class AdminSocket:
             if png is None:
                 raise DomainError("Icon not found", 404)
             return {"image_base64": base64.b64encode(png).decode()}
+        if method == "screenshots.list":
+            body = ListScreenshots.model_validate(params)
+            return {"items": self.store.screenshots(body.identity_id, body.limit, body.offset)}
+        if method == "screenshots.get":
+            body = ReadScreenshot.model_validate(params)
+            return self.store.screenshot_chunk(body.sha256, body.offset, body.length)
         if method == "ping":
             return {"pong": True}
         raise DomainError("Management method not found", 404)
