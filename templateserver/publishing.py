@@ -251,7 +251,9 @@ class Publisher:
                 row.revision,
                 {
                     "revision": row.revision,
-                    "replace_ids": row.payload["mappings"],
+                    # Only newly approved mappings travel to the paid main server. Worker documents
+                    # remain cumulative so offline clients can recover all historical aliases.
+                    "replace_ids": row.payload["approved"],
                     "template_count": len(row.payload["templates"]),
                     "manifest_url": f"{self.config.public_base}/releases/{row.revision}/manifest.json",
                 },

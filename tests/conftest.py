@@ -39,7 +39,6 @@ def store():
 def config(tmp_path):
     return Config(
         database_url="",
-        ingest_token="test-ingest",
         admin_token="test-admin",
         event_token="test-events",
         data_dir=tmp_path,

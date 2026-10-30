@@ -2,19 +2,19 @@
 
 独立部署的模板身份服务。接收图标，匹配正式或临时模板，给未知物品分配稳定的 `U-xxxx`；人工映射发布后，同时更新客户端资源与主统计服务器的映射。
 
+客户端直接访问 `https://templates-api.azurpilot.com/api/v3/post/templates/unknown`，上传不需要共享服务令牌；主服务器禁止代理模板上传、下载和管理。
+
 服务从空模板库启动，不依赖已有客户端模板。它不接收掉落事件、不计算统计、不识别整张截图，也没有第二套管理登录。模板管理页面位于主服务器现有 `/admin/` 面板的“模板服务”。
 
 ## 职责与数据流
 
 ```mermaid
 flowchart LR
-  C[客户端] -->|未知图标| M[主服务器上传入口]
-  M -->|转发图标| T[独立模板服务器]
-  T -->|正式 ID 或 U-ID、更新地址| M
-  A[主服务器统一管理面板] -->|管理代理| T
+  C[客户端] -->|图标直接上传| T[独立模板服务器]
+  A[统一管理面板的浏览器] -->|管理请求直接跨域| T
   T -->|发布静态资源| W[Cloudflare Worker Static Assets]
   C -->|直接下载模板与映射| W
-  T -->|持久化事件、重试、确认| M
+  T -->|仅映射变化与状态通知| M[主统计服务器]
 ```
 
 - 首次未知图标：保存规范图，分配随机且唯一的 `U-` 编号，自动排队发布临时模板。
@@ -67,7 +67,7 @@ uv run --env-file .env template-server
 docker compose up -d --build
 ```
 
-模板数据库与主服务器数据库独立。Compose 不公开数据库端口，模板 HTTP 只绑定本机 8093；通过自己的 HTTPS 反向代理供主服务器访问。镜像包含 Node、Wrangler 和锁定的 Python 依赖。启动先执行 Alembic，再启动服务。
+模板数据库与主服务器数据库独立。Compose 不公开数据库端口，模板 HTTP 只绑定本机 8093；通过自己的 HTTPS 入口供客户端和管理浏览器直连。镜像包含 Node、Wrangler 和锁定的 Python 依赖。启动先执行 Alembic，再启动服务。
 
 Cloudflare 参数为 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_API_TOKEN`、`CF_WORKER_NAME`、`CF_WORKER_DOMAIN`、`TEMPLATE_PUBLIC_BASE`。发布器通过 Wrangler 部署静态文件，并读取 Worker 上的 `latest.json` 确认内容后才激活版本。没有配置凭据时不会假装已经云端部署。
 
@@ -75,7 +75,7 @@ Worker 使用 [Static Assets](https://developers.cloudflare.com/workers/static-a
 
 ## 接入主服务器与客户端
 
-详见 [协议](docs/protocol.md) 和 [部署配置](docs/integration.md)。配套主服务器仓库为 `AzurPillotCloudServer`：新增管理代理、事件接收和模板管理页面，复用现有后台登录；该仓库里的旧 `cmd/templateserver` 不参与本服务部署。
+详见 [协议](docs/protocol.md) 和 [部署配置](docs/integration.md)。配套主服务器仓库为 `AzurPillotCloudServer`：仅保留事件接收和同面板的直连管理页面，复用现有后台登录凭据；该仓库里的旧 `cmd/templateserver` 不参与本服务部署。
 
 本项目提供客户端资源协议及验签函数，**没有修改游戏客户端源码**。客户端需按协议在本地事务中同时应用 `replace_ids` 和模板替换；这是客户端负责的数据库操作。
 

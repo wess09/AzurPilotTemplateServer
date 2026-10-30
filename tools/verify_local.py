@@ -17,7 +17,7 @@ from templateserver.signing import verify
 def main():
     main_url, template_url = "http://127.0.0.1:18096", "http://127.0.0.1:18093"
     headers = {"Authorization": "Bearer main-admin"}
-    admin = main_url + "/api/v1/admin/template-service"
+    admin = template_url + "/internal/v1/templates"
     client = httpx.Client(timeout=15, trust_env=False)
     # Synthetic fixture only: no player screenshots or account data.
     image = np.random.default_rng(int(uuid.uuid4().hex[:8], 16)).integers(
@@ -25,7 +25,7 @@ def main():
     )
     encoded = base64.b64encode(cv2.imencode(".png", image)[1]).decode()
     uploaded = client.post(
-        main_url + "/api/v3/post/templates/unknown",
+        template_url + "/api/v3/post/templates/unknown",
         json={"image_base64": encoded, "scene": "future-statistics", "client_revision": 0},
     )
     uploaded.raise_for_status()
@@ -77,7 +77,9 @@ def main():
         time.sleep(0.25)
     else:
         raise AssertionError("Publication or main acknowledgement timed out")
-    known = client.post(main_url + "/api/v3/post/templates/unknown", json={"image_base64": encoded}).json()
+    known = client.post(
+        template_url + "/api/v3/post/templates/unknown", json={"image_base64": encoded}
+    ).json()
     assert known["template_id"] == "BlueprintE2E" and known["match"] == "formal"
     key = base64.b64decode(status["public_key"])
     latest_response = client.get("http://127.0.0.1:8787/latest.json")

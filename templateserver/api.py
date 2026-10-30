@@ -8,8 +8,9 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Header, Query
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -102,13 +103,14 @@ class BodyLimit:
 
 
 class RateLimiter:
-    def __init__(self):
+    def __init__(self, clock=time.monotonic):
         self.entries = OrderedDict()
         self.mutex = threading.Lock()
+        self.clock = clock
 
     def check(self, token: str):
         with self.mutex:
-            now = time.monotonic()
+            now = self.clock()
             previous, available = self.entries.pop(token, (now, 50.0))
             available = min(50.0, available + (now - previous) * 10)
             if len(self.entries) >= 10_000:
@@ -118,13 +120,15 @@ class RateLimiter:
                 raise DomainError("Upload rate exceeded; retry later", 429)
 
 
-def create_app(config: Config | None = None, store=None, *, background=True, publisher=None):
+def create_app(
+    config: Config | None = None, store=None, *, background=True, publisher=None, rate_limiter=None
+):
     config = config or Config.from_env()
     store = store or Store(config.database_url)
     publisher = publisher or Publisher(store, config)
     delivery = Delivery(store, config)
     stop = threading.Event()
-    rate = RateLimiter()
+    rate = rate_limiter or RateLimiter()
 
     def run_publication():
         failures = 0
@@ -168,6 +172,14 @@ def create_app(config: Config | None = None, store=None, *, background=True, pub
 
     app = FastAPI(title="AzurPilot Template Service", version="0.1.0", lifespan=lifespan)
     app.add_middleware(BodyLimit)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(config.admin_origins),
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Authorization", "Content-Type", "X-AzurPilot-ID"],
+        expose_headers=["Retry-After"],
+        max_age=600,
+    )
     app.state.store, app.state.publisher = store, publisher
 
     @app.exception_handler(DomainError)
@@ -189,11 +201,13 @@ def create_app(config: Config | None = None, store=None, *, background=True, pub
         if not hmac.compare_digest((authorization or "").encode(), ("Bearer " + expected).encode()):
             raise DomainError("Invalid service credential", 401)
 
-    def ingest_auth(
-        authorization: Annotated[str | None, Header()] = None, x_azurpilot_id: Annotated[str, Header()] = ""
-    ):
-        authenticate(config.ingest_token, authorization)
-        rate.check(x_azurpilot_id[:128] or "shared-ingest")
+    def ingest_limit(request: Request, x_azurpilot_id: Annotated[str, Header()] = ""):
+        # Public client uploads never require a shared server credential. Do not trust arbitrary
+        # forwarded IP headers; the socket peer bucket also bounds clients rotating device IDs.
+        peer = request.client.host if request.client else "unknown"
+        rate.check("peer:" + peer)
+        if x_azurpilot_id:
+            rate.check("device:" + x_azurpilot_id[:128])
 
     def admin_auth(authorization: Annotated[str | None, Header()] = None):
         authenticate(config.admin_token, authorization)
@@ -212,11 +226,11 @@ def create_app(config: Config | None = None, store=None, *, background=True, pub
         result["update_url"] = config.public_base + "/latest.json"
         return result
 
-    @app.post("/api/v3/post/templates/unknown", dependencies=[Depends(ingest_auth)])
+    @app.post("/api/v3/post/templates/unknown", dependencies=[Depends(ingest_limit)])
     def unknown(body: UnknownUpload):
         return upload_result(body)
 
-    @app.post("/api/v3/post/unknown-candidates", dependencies=[Depends(ingest_auth)])
+    @app.post("/api/v3/post/unknown-candidates", dependencies=[Depends(ingest_limit)])
     def unknown_batch(body: UnknownBatch):
         icons = [decode_icon(row.image_base64) for row in body.candidates]
         return {

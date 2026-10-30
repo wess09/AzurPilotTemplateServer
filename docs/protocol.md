@@ -2,7 +2,7 @@
 
 ## 未知图标上传
 
-客户端入口沿用主服务器 `POST /api/v3/post/templates/unknown`，主服务器转发到独立模板服务的同路径，使用 `TEMPLATE_INGEST_TOKEN`。
+客户端直接调用 `POST https://templates-api.azurpilot.com/api/v3/post/templates/unknown`，不经过主服务器，不需要 `Authorization` 或共享上传令牌。可选 `X-AzurPilot-ID` 标识设备；同时按连接来源和设备限流，10 次/秒、突发 50。不要信任客户端自行填写的转发 IP 头。
 
 ```json
 {
@@ -69,7 +69,7 @@
 
 ## 管理接口
 
-以下是模板服务内部接口，使用 `TEMPLATE_ADMIN_TOKEN`。浏览器通过主服务器的 `/api/v1/admin/template-service/*` 管理代理调用，不持有模板服务令牌。
+以下接口全部直接调用模板服务器，使用 `TEMPLATE_ADMIN_TOKEN`。将该值设置为统一面板的 `ADMIN_TOKEN`，浏览器使用现有登录凭据跨域直连，不调用主服务器的模板管理代理。`TEMPLATE_ADMIN_ORIGINS` 配置允许的面板来源；CORS 不替代令牌鉴权。
 
 | 方法 | 模板服务路径 | 功能 |
 |---|---|---|
@@ -97,6 +97,10 @@
 }
 ```
 
-其他事件为 `template.registered`、`release.failed`。注册事件只更新状况，不能把未发布草稿当成正式映射。
+其他事件为 `template.registered`、`release.failed`。注册事件只更新状况，不能把未发布草稿当成正式映射。发送至主服务器的 `release.published.payload.replace_ids` 只包含本次批准的映射变化，不重复发送完整历史映射；Worker 的映射与增量仍包含累计映射。主服务器对收到的映射逐项更新，不清空未出现在当前事件中的旧映射。所有事件均不包含图标、图片 Base64 或模板包。
 
 主服务器提交事件与映射事务后返回 `{"ack":"<相同 event_id>"}`。没有精确 ack 就持续保留并重试。事件按序交付，失败指数退避最多 256 秒；重复事件幂等，同 ID 不同正文拒绝，旧 revision 不覆盖新映射。需要审计／补拉时可带事件令牌访问 `GET /internal/v1/templates/events?after=<sequence>`。
+
+## 主服务器流量边界
+
+主服务器只提供 `POST /internal/v1/templates/events` 接收必要映射和状况通知。模板上传、列表、预览、导入、草稿、发布和发布记录全部直连模板服务器；模板包、增量、映射和图标下载全部直连 Worker。主服务器旧模板上传、资源代理、管理代理和旧候选/模板发布路由均已删除，返回 404。

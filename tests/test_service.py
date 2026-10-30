@@ -8,7 +8,7 @@ from conftest import encoded_image
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from templateserver.api import create_app
+from templateserver.api import RateLimiter, create_app
 from templateserver.delivery import Delivery
 from templateserver.imaging import decode_icon
 from templateserver.models import IconImage, MappingDraft, OutboxEvent, TemplateIdentity
@@ -164,15 +164,15 @@ def test_api_auth_validation_scene_independence_and_update_signal(store, config)
     with TestClient(app) as client:
         endpoint = "/api/v3/post/templates/unknown"
         data = {"image_base64": encoded_image(), "scene": "future-scene"}
-        assert client.post(endpoint, json=data).status_code == 401
-        headers = {"Authorization": "Bearer test-ingest"}
-        first = client.post(endpoint, headers=headers, json=data).json()
+        response = client.post(endpoint, json=data)
+        assert response.status_code == 200
+        first = response.json()
         data["scene"] = "another-scene"
-        second = client.post(endpoint, headers=headers, json=data).json()
+        second = client.post(endpoint, json=data).json()
         assert first["template_id"] == second["template_id"]
         assert first["update_required"] and first["update_url"].endswith("latest.json")
-        assert client.post(endpoint, headers=headers, json={"image_base64": "wrong"}).status_code == 400
-        assert client.post(endpoint, headers=headers, content="x" * (513 * 1024)).status_code == 413
+        assert client.post(endpoint, json={"image_base64": "wrong"}).status_code == 400
+        assert client.post(endpoint, content="x" * (513 * 1024)).status_code == 413
         assert (
             client.put(
                 "/internal/v1/templates/mappings/" + first["template_id"],
@@ -209,10 +209,101 @@ def test_known_icon_always_notifies_refresh_even_at_current_revision(store, conf
         revision = app.state.publisher.run_once()
         response = client.post(
             "/api/v3/post/templates/unknown",
-            headers={"Authorization": "Bearer test-ingest"},
             json={"image_base64": image, "client_revision": revision},
         )
         assert response.status_code == 200
         result = response.json()
         assert result["match"] == "formal" and result["template_id"] == "KnownBlueprint"
         assert result["update_required"] and not result["publication_pending"]
+
+
+def test_direct_admin_cors_authentication_and_error_responses(store, config):
+    app = create_app(config, store=store, background=False)
+    origin = "https://api.azurpilot.com"
+    with TestClient(app) as client:
+        preflight = client.options(
+            "/internal/v1/templates/status",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers["access-control-allow-origin"] == origin
+        denied = client.options(
+            "/internal/v1/templates/status",
+            headers={"Origin": "https://untrusted.example", "Access-Control-Request-Method": "GET"},
+        )
+        assert denied.status_code == 400
+        assert "access-control-allow-origin" not in denied.headers
+        unauthenticated = client.get("/internal/v1/templates/status", headers={"Origin": origin})
+        assert unauthenticated.status_code == 401
+        assert unauthenticated.headers["access-control-allow-origin"] == origin
+        authenticated = client.get(
+            "/internal/v1/templates/status",
+            headers={"Origin": origin, "Authorization": "Bearer test-admin"},
+        )
+        assert authenticated.status_code == 200
+        assert authenticated.headers["access-control-allow-origin"] == origin
+        too_large = client.post(
+            "/internal/v1/templates",
+            headers={"Origin": origin, "Authorization": "Bearer test-admin"},
+            content="x" * (513 * 1024),
+        )
+        assert too_large.status_code == 413
+        assert too_large.headers["access-control-allow-origin"] == origin
+
+
+def test_public_upload_rate_limit_cannot_be_bypassed_with_rotating_device_ids(store, config):
+    app = create_app(config, store=store, background=False, rate_limiter=RateLimiter(clock=lambda: 0.0))
+    with TestClient(app) as client:
+        for index in range(50):
+            response = client.post(
+                "/api/v3/post/templates/unknown",
+                headers={"X-AzurPilot-ID": str(index)},
+                json={"image_base64": "not-a-png"},
+            )
+            assert response.status_code == 400
+        response = client.post(
+            "/api/v3/post/templates/unknown",
+            headers={"X-AzurPilot-ID": "new-device"},
+            json={"image_base64": "not-a-png"},
+        )
+        assert response.status_code == 429 and response.headers["retry-after"] == "1"
+
+
+def test_public_batch_upload_needs_no_service_credential(store, config):
+    image = encoded_image()
+    with TestClient(create_app(config, store=store, background=False)) as client:
+        response = client.post(
+            "/api/v3/post/unknown-candidates",
+            json={"candidates": [{"image_base64": image}, {"image_base64": image}]},
+        )
+        assert response.status_code == 200
+        first, second = response.json()["results"]
+        assert first["template_id"] == second["template_id"]
+        assert first["match"] == "new" and second["match"] == "cluster"
+
+
+def test_main_notifications_only_carry_changed_mappings_and_never_template_images(store, config):
+    first = store.ingest(decode_icon(encoded_image(10)))
+    publisher = Publisher(store, config)
+    publisher.run_once()
+    mapping = {"item_id": "BlueprintT3", "name": "图纸", "tag": ""}
+    store.save_mapping(first["template_id"], mapping)
+    store.request_publish("Approve one alias")
+    mapped_revision = publisher.run_once()
+    publications = [event for event in store.events(0) if event["type"] == "release.published"]
+    assert publications[-1]["payload"]["replace_ids"] == [{"unknown_id": first["template_id"], **mapping}]
+    store.ingest(decode_icon(encoded_image(99)))
+    temporary_revision = publisher.run_once()
+    assert temporary_revision > mapped_revision
+    publications = [event for event in store.events(0) if event["type"] == "release.published"]
+    assert publications[-1]["payload"]["replace_ids"] == []
+    manifest = verify(
+        json.loads((config.data_dir / "public" / "manifest.json").read_bytes()),
+        publisher.key.public_key().public_bytes_raw(),
+    )
+    assert len(manifest["replace_ids"]) == 1
+    assert "image_base64" not in json.dumps(store.events(0), default=str)
