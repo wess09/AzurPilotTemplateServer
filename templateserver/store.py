@@ -175,6 +175,9 @@ class Store:
                 )
             ]
             state["drafts"] = session.scalar(select(func.count()).select_from(MappingDraft))
+            state["last_draft_updated_at"] = session.scalar(select(func.max(MappingDraft.updated_at)))
+            state["last_activity"] = session.scalar(select(func.max(TemplateIdentity.last_seen)))
+            state["total_hits"] = session.scalar(select(func.coalesce(func.sum(TemplateIdentity.hits), 0)))
             state["pending_events"] = session.scalar(
                 select(func.count()).select_from(OutboxEvent).where(OutboxEvent.acknowledged_at.is_(None))
             )

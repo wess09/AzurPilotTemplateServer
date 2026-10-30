@@ -13,6 +13,7 @@ dependencies = [
   "opencv-python-headless>=4.10,<5",
   "cryptography>=44",
   "httpx>=0.28,<1",
+  "websockets>=15,<17",
 ]
 
 [dependency-groups]

@@ -1,70 +1,25 @@
-import base64
 import hmac
 import logging
-import re
 import threading
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi.responses import JSONResponse
 
+from .admin import AdminSocket
 from .config import Config
 from .delivery import Delivery
 from .imaging import decode_icon
 from .publishing import Publisher
+from .schemas import UnknownBatch, UnknownUpload
 from .store import DomainError, Store
 
 logger = logging.getLogger(__name__)
-ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,127}$")
-
-
-class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-
-class UnknownUpload(StrictModel):
-    image_base64: str = Field(max_length=350_000)
-    client_revision: int = Field(default=0, ge=0)
-    scene: str = Field(default="", max_length=64)
-    client: str = Field(default="", max_length=64)
-
-
-class UnknownBatch(StrictModel):
-    candidates: list[UnknownUpload] = Field(min_length=1, max_length=50)
-
-
-class MappingBody(StrictModel):
-    item_id: str = Field(min_length=1, max_length=128)
-    name: str = Field(min_length=1, max_length=128)
-    tag: str = Field(default="", max_length=32)
-
-    @field_validator("item_id")
-    @classmethod
-    def validate_id(cls, value):
-        if value != value.strip() or not ITEM_ID.fullmatch(value) or value.startswith("U-"):
-            raise ValueError("Use a stable formal item ID; U- is reserved for temporary identities")
-        return value
-
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, value):
-        if not value.strip():
-            raise ValueError("Display name cannot be blank")
-        return value.strip()
-
-
-class FormalUpload(MappingBody):
-    image_base64: str = Field(max_length=350_000)
-
-
-class PublishBody(StrictModel):
-    note: str = Field(default="Administrator mapping publication", max_length=500)
 
 
 class BodyLimit:
@@ -170,7 +125,14 @@ def create_app(
         delivery.close()
         store.close()
 
-    app = FastAPI(title="AzurPilot Template Service", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="AzurPilot Template Service",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.add_middleware(BodyLimit)
     app.add_middleware(
         CORSMiddleware,
@@ -209,9 +171,6 @@ def create_app(
         if x_azurpilot_id:
             rate.check("device:" + x_azurpilot_id[:128])
 
-    def admin_auth(authorization: Annotated[str | None, Header()] = None):
-        authenticate(config.admin_token, authorization)
-
     def event_auth(authorization: Annotated[str | None, Header()] = None):
         authenticate(config.event_token, authorization)
 
@@ -241,49 +200,7 @@ def create_app(
     def events(after: int = Query(default=0, ge=0)):
         return {"events": jsonable_encoder(store.events(after))}
 
-    @app.get("/internal/v1/templates/status", dependencies=[Depends(admin_auth)])
-    def status():
-        return {
-            **store.status(),
-            "deploy_mode": config.deploy_mode,
-            "public_base": config.public_base,
-            "main_event_configured": bool(config.main_event_url and config.event_token),
-            "public_key": base64.b64encode(publisher.key.public_key().public_bytes_raw()).decode(),
-        }
-
-    @app.get("/internal/v1/templates", dependencies=[Depends(admin_auth)])
-    def templates(
-        kind: Literal["formal", "temporary"] | None = None,
-        limit: int = Query(default=50, ge=1, le=200),
-        offset: int = Query(default=0, ge=0),
-    ):
-        return {"items": store.templates(kind, limit, offset)}
-
-    @app.get("/internal/v1/templates/icons/{sha256}", dependencies=[Depends(admin_auth)])
-    def icon_preview(sha256: str):
-        if not re.fullmatch(r"[a-f0-9]{64}", sha256):
-            raise DomainError("Icon not found", 404)
-        data = store.icon_png(sha256)
-        if data is None:
-            raise DomainError("Icon not found", 404)
-        return Response(data, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
-
-    @app.post("/internal/v1/templates", dependencies=[Depends(admin_auth)])
-    def import_formal(body: FormalUpload):
-        metadata = body.model_dump(exclude={"image_base64"})
-        return store.ingest(decode_icon(body.image_base64, allow_cell=True), formal=metadata)
-
-    @app.put("/internal/v1/templates/mappings/{unknown_id}", dependencies=[Depends(admin_auth)])
-    def save_mapping(unknown_id: str, body: MappingBody):
-        store.save_mapping(unknown_id, body.model_dump())
-        return {"saved": True, "published": False}
-
-    @app.post("/internal/v1/templates/publish", status_code=202, dependencies=[Depends(admin_auth)])
-    def publish(body: PublishBody):
-        return {"request_id": store.request_publish(body.note), "status": "queued"}
-
-    @app.get("/internal/v1/templates/releases", dependencies=[Depends(admin_auth)])
-    def releases():
-        return {"items": store.releases()}
+    administration = AdminSocket(store, publisher, config)
+    app.websocket("/internal/v1/templates/ws")(administration.connect)
 
     return app

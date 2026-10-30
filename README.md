@@ -4,14 +4,14 @@
 
 客户端直接访问 `https://templates-api.azurpilot.com/api/v3/post/templates/unknown`，上传不需要共享服务令牌；主服务器禁止代理模板上传、下载和管理。
 
-服务从空模板库启动，不依赖已有客户端模板。它不接收掉落事件、不计算统计、不识别整张截图，也没有第二套管理登录。模板管理页面位于主服务器现有 `/admin/` 面板的“模板服务”。
+服务从空模板库启动，不依赖已有客户端模板。它不接收掉落事件、不计算统计、不识别整张截图，也没有第二套管理登录。模板管理页面位于 Cloudflare 托管的 `https://admin.azurpilot.com` 统一面板，通过 WebSocket 直接连接两个后端。前端独立仓库为新建 `wess09/AzurPilotCloudWeb`，由 GitHub 原生关联自动部署。
 
 ## 职责与数据流
 
 ```mermaid
 flowchart LR
   C[客户端] -->|图标直接上传| T[独立模板服务器]
-  A[统一管理面板的浏览器] -->|管理请求直接跨域| T
+  A[统一管理面板的浏览器] -->|管理 WebSocket 直接连接| T
   T -->|发布静态资源| W[Cloudflare Worker Static Assets]
   C -->|直接下载模板与映射| W
   T -->|仅映射变化与状态通知| M[主统计服务器]

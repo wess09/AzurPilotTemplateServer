@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import time
 import uuid
 from datetime import UTC, datetime
@@ -10,14 +11,33 @@ import cv2
 import httpx
 import numpy as np
 from sqlalchemy import create_engine, select
+from websockets.sync.client import connect
 
 from templateserver.signing import verify
 
 
 def main():
     main_url, template_url = "http://127.0.0.1:18096", "http://127.0.0.1:18093"
-    headers = {"Authorization": "Bearer main-admin"}
-    admin = template_url + "/internal/v1/templates"
+    socket = connect(
+        template_url.replace("http:", "ws:") + "/internal/v1/templates/ws",
+        origin="https://admin.azurpilot.com",
+        proxy=None,
+    )
+    socket.send(json.dumps({"type": "auth", "token": "main-admin"}))
+    assert json.loads(socket.recv())["type"] == "authenticated"
+    serial = 0
+
+    def rpc(method, params=None):
+        nonlocal serial
+        serial += 1
+        identity = str(serial)
+        socket.send(json.dumps({"id": identity, "method": method, "params": params or {}}))
+        while True:
+            result = json.loads(socket.recv(timeout=15))
+            if result.get("id") == identity:
+                assert result["type"] == "result", result
+                return result["data"]
+
     client = httpx.Client(timeout=15, trust_env=False)
     # Synthetic fixture only: no player screenshots or account data.
     image = np.random.default_rng(int(uuid.uuid4().hex[:8], 16)).integers(
@@ -31,7 +51,7 @@ def main():
     uploaded.raise_for_status()
     unknown = uploaded.json()["template_id"]
     assert unknown.startswith("U-")
-    key = base64.b64decode(client.get(admin + "/status", headers=headers).json()["public_key"])
+    key = base64.b64decode(rpc("status.get")["public_key"])
     for _ in range(80):
         latest_document = client.get("http://127.0.0.1:8787/latest.json")
         latest = verify(latest_document.json(), key)
@@ -62,16 +82,10 @@ def main():
     received = client.post(main_url + "/api/v3/post/drops", json={"drops": events})
     received.raise_for_status()
     assert all(row["status"] == "accepted" for row in received.json()["results"])
-    response = client.put(
-        admin + "/mappings/" + unknown,
-        headers=headers,
-        json={"item_id": "BlueprintE2E", "name": "测试图纸", "tag": ""},
-    )
-    response.raise_for_status()
-    response = client.post(admin + "/publish", headers=headers, json={"note": "本地完整闭环验证"})
-    response.raise_for_status()
+    rpc("mappings.save", {"unknown_id": unknown, "item_id": "BlueprintE2E", "name": "测试图纸", "tag": ""})
+    rpc("publish", {"note": "本地完整 WebSocket 闭环验证"})
     for _ in range(80):
-        status = client.get(admin + "/status", headers=headers).json()
+        status = rpc("status.get")
         if status["drafts"] == 0 and status["pending_events"] == 0:
             break
         time.sleep(0.25)
@@ -95,7 +109,7 @@ def main():
     from sqlalchemy import MetaData, Table
 
     engine = create_engine("postgresql+psycopg://template_test@127.0.0.1:55439/postgres")
-    metadata = MetaData(schema="main_template_live")
+    metadata = MetaData(schema=os.environ.get("E2E_MAIN_SCHEMA", "main_ws_e2e"))
     items = Table("commission_items", metadata, autoload_with=engine)
     aggregates = Table("commission_item_hourly", metadata, autoload_with=engine)
     with engine.connect() as connection:
@@ -108,11 +122,27 @@ def main():
             )
         ).first()
         assert result and result.amount >= 612 and result.occurrences >= 51
+    public = client.get(
+        main_url + "/api/v3/get/commission",
+        params={"comm": "Template E2E Escort", "server": "cn"},
+        headers={"Origin": "https://stats.azurpilot.com"},
+    )
+    public.raise_for_status()
+    assert public.headers["access-control-allow-origin"] == "https://stats.azurpilot.com"
+    group = public.json()["groups"][0]
+    assert group["samples"] == 51
+    assert group["items"][0]["amount"] == 612
+    assert group["items"][0]["occurrences"] == 51
+    for route in ["/admin/", "/api/upload", "/api/v2/get/research", "/api/v1/admin/statistics/overview"]:
+        assert client.get(main_url + route).status_code == 404
+    assert client.get(template_url + "/internal/v1/templates/status").status_code == 404
     report = {
         "unknown_id": unknown,
         "formal_id": "BlueprintE2E",
         "revision": latest["revision"],
         "main_acknowledged": True,
+        "management_transport": "websocket",
+        "public_statistics_verified": True,
         "historical_events_verified": 51,
         "worker_manifest_signature_verified": True,
         "separate_template_url": template_url,
@@ -124,6 +154,7 @@ def main():
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(json.dumps(report, ensure_ascii=False))
+    socket.close()
     client.close()
     engine.dispose()
 

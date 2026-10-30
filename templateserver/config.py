@@ -9,7 +9,7 @@ class Config:
     database_url: str
     admin_token: str
     event_token: str
-    admin_origins: tuple[str, ...] = ("https://api.azurpilot.com", "https://stats.azurpilot.com")
+    admin_origins: tuple[str, ...] = ("https://admin.azurpilot.com",)
     public_base: str = "http://127.0.0.1:8787"
     main_event_url: str = ""
     data_dir: Path = Path("data")
@@ -26,9 +26,7 @@ class Config:
             event_token=os.getenv("TEMPLATE_EVENT_TOKEN", ""),
             admin_origins=tuple(
                 origin.strip().rstrip("/")
-                for origin in os.getenv(
-                    "TEMPLATE_ADMIN_ORIGINS", "https://api.azurpilot.com,https://stats.azurpilot.com"
-                ).split(",")
+                for origin in os.getenv("TEMPLATE_ADMIN_ORIGINS", "https://admin.azurpilot.com").split(",")
                 if origin.strip()
             ),
             public_base=os.getenv("TEMPLATE_PUBLIC_BASE", "http://127.0.0.1:8787").rstrip("/"),

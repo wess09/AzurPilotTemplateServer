@@ -173,14 +173,19 @@ def test_api_auth_validation_scene_independence_and_update_signal(store, config)
         assert first["update_required"] and first["update_url"].endswith("latest.json")
         assert client.post(endpoint, json={"image_base64": "wrong"}).status_code == 400
         assert client.post(endpoint, content="x" * (513 * 1024)).status_code == 413
-        assert (
-            client.put(
-                "/internal/v1/templates/mappings/" + first["template_id"],
-                headers={"Authorization": "Bearer test-admin"},
-                json={"item_id": "U-invalid", "name": "wrong"},
-            ).status_code
-            == 422
-        )
+        with client.websocket_connect(
+            "/internal/v1/templates/ws", headers={"origin": "https://admin.azurpilot.com"}
+        ) as socket:
+            socket.send_json({"type": "auth", "token": "test-admin"})
+            assert socket.receive_json()["type"] == "authenticated"
+            socket.send_json(
+                {
+                    "id": "map",
+                    "method": "mappings.save",
+                    "params": {"unknown_id": first["template_id"], "item_id": "U-invalid", "name": "wrong"},
+                }
+            )
+            assert socket.receive_json()["error"]["status"] == 422
 
 
 def test_signature_tamper_rejected_and_key_persists(store, config):
@@ -200,12 +205,19 @@ def test_known_icon_always_notifies_refresh_even_at_current_revision(store, conf
     app = create_app(config, store=store, background=False)
     with TestClient(app) as client:
         image = encoded_image()
-        response = client.post(
-            "/internal/v1/templates",
-            headers={"Authorization": "Bearer test-admin"},
-            json={"item_id": "KnownBlueprint", "name": "已知图纸", "image_base64": image},
-        )
-        assert response.status_code == 200
+        with client.websocket_connect(
+            "/internal/v1/templates/ws", headers={"origin": "https://admin.azurpilot.com"}
+        ) as socket:
+            socket.send_json({"type": "auth", "token": "test-admin"})
+            assert socket.receive_json()["type"] == "authenticated"
+            socket.send_json(
+                {
+                    "id": "import",
+                    "method": "templates.import",
+                    "params": {"item_id": "KnownBlueprint", "name": "已知图纸", "image_base64": image},
+                }
+            )
+            assert socket.receive_json()["type"] == "result"
         revision = app.state.publisher.run_once()
         response = client.post(
             "/api/v3/post/templates/unknown",
@@ -217,42 +229,46 @@ def test_known_icon_always_notifies_refresh_even_at_current_revision(store, conf
         assert result["update_required"] and not result["publication_pending"]
 
 
-def test_direct_admin_cors_authentication_and_error_responses(store, config):
-    app = create_app(config, store=store, background=False)
-    origin = "https://api.azurpilot.com"
-    with TestClient(app) as client:
-        preflight = client.options(
+def test_admin_websocket_auth_origin_commands_push_and_retired_rest(store, config):
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(create_app(config, store=store, background=False)) as client:
+        with (
+            pytest.raises(WebSocketDisconnect),
+            client.websocket_connect(
+                "/internal/v1/templates/ws", headers={"origin": "https://untrusted.example"}
+            ),
+        ):
+            pass
+        with client.websocket_connect(
+            "/internal/v1/templates/ws", headers={"origin": "https://admin.azurpilot.com"}
+        ) as socket:
+            socket.send_json({"type": "auth", "token": "invalid"})
+            assert socket.receive_json()["error"]["status"] == 401
+        for path in [
+            "/docs",
+            "/redoc",
+            "/openapi.json",
             "/internal/v1/templates/status",
-            headers={
-                "Origin": origin,
-                "Access-Control-Request-Method": "GET",
-                "Access-Control-Request-Headers": "authorization",
-            },
-        )
-        assert preflight.status_code == 200
-        assert preflight.headers["access-control-allow-origin"] == origin
-        denied = client.options(
-            "/internal/v1/templates/status",
-            headers={"Origin": "https://untrusted.example", "Access-Control-Request-Method": "GET"},
-        )
-        assert denied.status_code == 400
-        assert "access-control-allow-origin" not in denied.headers
-        unauthenticated = client.get("/internal/v1/templates/status", headers={"Origin": origin})
-        assert unauthenticated.status_code == 401
-        assert unauthenticated.headers["access-control-allow-origin"] == origin
-        authenticated = client.get(
-            "/internal/v1/templates/status",
-            headers={"Origin": origin, "Authorization": "Bearer test-admin"},
-        )
-        assert authenticated.status_code == 200
-        assert authenticated.headers["access-control-allow-origin"] == origin
-        too_large = client.post(
             "/internal/v1/templates",
-            headers={"Origin": origin, "Authorization": "Bearer test-admin"},
-            content="x" * (513 * 1024),
-        )
-        assert too_large.status_code == 413
-        assert too_large.headers["access-control-allow-origin"] == origin
+            "/internal/v1/templates/releases",
+        ]:
+            assert client.get(path, headers={"Authorization": "Bearer test-admin"}).status_code == 404
+        with client.websocket_connect(
+            "/internal/v1/templates/ws", headers={"origin": "https://admin.azurpilot.com"}
+        ) as socket:
+            socket.send_json({"type": "auth", "token": "test-admin"})
+            assert socket.receive_json()["type"] == "authenticated"
+            socket.send_json({"id": "sub", "method": "state.subscribe"})
+            assert socket.receive_json()["id"] == "sub"
+            first = socket.receive_json()
+            assert first["type"] == "event" and first["data"]["total_hits"] == 0
+            store.ingest(decode_icon(encoded_image(33)))
+            changed = socket.receive_json()
+            assert changed["type"] == "event" and changed["data"]["total_hits"] == 1
+            socket.send_json({"id": "list", "method": "templates.list"})
+            response = socket.receive_json()
+            assert response["id"] == "list" and len(response["data"]["items"]) == 1
 
 
 def test_public_upload_rate_limit_cannot_be_bypassed_with_rotating_device_ids(store, config):
