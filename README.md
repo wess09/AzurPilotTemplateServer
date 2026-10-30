@@ -50,7 +50,7 @@ Python / FastAPI / SQLAlchemy 2 / Alembic / PostgreSQL / OpenCV。数据库定�
 uv sync --frozen
 npm ci
 Copy-Item .env.example .env
-# 填写 .env 中的数据库和三个服务间令牌。
+# 填写 .env 中的数据库、与统一面板一致的管理员令牌和事件令牌。
 uv run --env-file .env alembic upgrade head
 uv run --env-file .env template-server
 ```
@@ -61,7 +61,7 @@ uv run --env-file .env template-server
 
 ## Docker 部署
 
-填写 `.env` 中的 `POSTGRES_PASSWORD`（URI 安全字符）、三个随机服务令牌和 Cloudflare 参数，然后运行：
+填写 `.env` 中的 `POSTGRES_PASSWORD`（URI 安全字符）、与统一面板一致的管理员令牌、随机事件令牌和 Cloudflare 参数，然后运行：
 
 ```powershell
 docker compose up -d --build
