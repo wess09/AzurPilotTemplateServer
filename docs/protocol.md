@@ -70,9 +70,11 @@
 
 签名对象是解码后的原始字节，不依赖各语言对 JSON 的重排。Python 参考函数为 `templateserver.signing.verify(document, pinned_public_key)`。
 
-不可变目录为 `/releases/<revision>/`，其中有 `manifest.json`、`mappings.json`、`deltas/<from>.json` 和 `icons/<PNG sha256>.png`。签名 manifest 包含模板条目、匹配阈值及完整 `replace_ids`；增量包含 `upserts`、`deletions` 和累计 `replace_ids`。每次保留最近 50 个来源版本的差异，`0.json` 始终可用于全量恢复。
+不可变目录为 `/releases/<revision>/`，其中有 `manifest.json`、`mappings.json` 和 `deltas/<from>.json`。图标统一存放在 `/releases/assets/<PNG sha256>.png`，相同文件只保存一份，各版本通过 `url` 引用；manifest 和增量不重复嵌入图标 base64。签名 manifest 包含模板条目、匹配阈值及完整 `replace_ids`；增量包含 `upserts`、`deletions` 和累计 `replace_ids`。每次保留最近 50 个来源版本的差异，`0.json` 始终可用于全量恢复。
 
 Worker 部署包包含当前完整版本及最近最多 50 个历史版本目录，总文件数不超过 20,000；达到预算时从最旧的历史目录开始退出公开部署。数据库和服务器本地发布归档保留完整历史。旧版本资源不存在时，客户端重新获取 `latest.json` 并使用当前完整版本；累计 `replace_ids` 不受历史目录裁剪影响。单个静态文件最大 25 MiB，超限时保留原线上版本并在管理端报告错误。
+
+旧版本已签名清单中的 `/releases/<revision>/icons/<hash>.png` 由 Worker 静态资源规则内部改写到共享图标路径，返回原始 PNG 和 HTTP 200，不要求客户端跟随重定向，也不改变已发布清单的签名。
 
 模板条目的稳定槽位键为 `identity_id:icon_sha256`。映射后该槽位的 `template_id` 从 U-ID 替换为正式 ID，并保留同一图标。读取器优先正式模板，再读临时模板。
 

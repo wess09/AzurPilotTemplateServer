@@ -36,6 +36,14 @@ def atomic_write(path: Path, data: bytes):
     temporary.replace(path)
 
 
+def remove_build_directory(path: Path, root: Path):
+    if path.exists():
+        resolved, boundary = path.resolve(), root.resolve()
+        if path.is_symlink() or not resolved.is_relative_to(boundary) or resolved == boundary:
+            raise PublicationError("Invalid directory in the deployment build.")
+        shutil.rmtree(path)
+
+
 def template_key(entry):
     return entry["identity_id"] + ":" + entry["icon_sha256"]
 
@@ -136,18 +144,26 @@ class Publisher:
     def render(self, release: Release):
         root = self.config.data_dir / "builds" / str(release.revision)
         directory = root / "releases" / str(release.revision)
+        assets = root / "releases" / "assets"
+        assets.mkdir(parents=True, exist_ok=True)
+        archive = self.config.data_dir / "public" / "releases" / "assets"
+        if archive.exists():
+            for icon in archive.glob("*.png"):
+                if not (assets / icon.name).exists():
+                    os.link(icon, assets / icon.name)
         payload = release.payload
         entries = []
         for source in payload["templates"]:
             entry = dict(source)
-            png = base64.b64decode(entry["image_base64"])
+            png = base64.b64decode(entry.pop("image_base64"))
             file_hash = hashlib.sha256(png).hexdigest()
-            relative = f"icons/{file_hash}.png"
-            atomic_write(directory / relative, png)
-            entry.update(
-                sha256=file_hash, url=f"{self.config.public_base}/releases/{release.revision}/{relative}"
-            )
+            relative = f"releases/assets/{file_hash}.png"
+            if not (root / relative).exists():
+                atomic_write(root / relative, png)
+            entry.update(sha256=file_hash, url=f"{self.config.public_base}/{relative}")
             entries.append(entry)
+        # Old failed builds stored a complete icon copy inside this revision.
+        remove_build_directory(directory / "icons", root)
         manifest = {
             "schema_version": 1,
             "revision": release.revision,
@@ -172,9 +188,11 @@ class Publisher:
                 .order_by(Release.revision.desc())
                 .limit(RELEASE_HISTORY_LIMIT)
             ).all()
+        public_entries = {template_key(entry): entry for entry in entries}
         for prior in [None, *previous]:
             from_revision = prior.revision if prior else 0
             change = delta(prior.payload if prior else {}, payload, release.revision, from_revision)
+            change["upserts"] = [public_entries[template_key(entry)] for entry in change["upserts"]]
             atomic_write(
                 directory / "deltas" / f"{from_revision}.json", json_bytes(envelope(change, self.key))
             )
@@ -188,6 +206,8 @@ class Publisher:
         atomic_write(root / "latest.json", json_bytes(envelope(latest, self.key)))
         atomic_write(root / "manifest.json", (directory / "manifest.json").read_bytes())
         atomic_write(root / "mappings.json", (directory / "mappings.json").read_bytes())
+        # Internal rewrites return 200; older clients intentionally refuse HTTP redirects.
+        atomic_write(root / "_redirects", b"/releases/:revision/icons/:file /releases/assets/:file 200\n")
         atomic_write(
             root / "_headers",
             b"/*\n  Access-Control-Allow-Origin: *\n  X-Content-Type-Options: nosniff\n/releases/*\n  Cache-Control: public, max-age=31536000, immutable\n/latest.json\n  Cache-Control: public, max-age=0, must-revalidate\n",
@@ -200,7 +220,9 @@ class Publisher:
         releases = root / "releases"
         archive = self.config.data_dir / "public" / "releases"
         current = releases / str(revision)
+        assets = releases / "assets"
         count = sum(path.is_file() for path in current.rglob("*"))
+        count += sum(path.is_file() for path in assets.rglob("*"))
         count += sum(path.is_file() for path in root.iterdir())
         sources = {}
         for parent in (archive, releases):
@@ -213,27 +235,40 @@ class Publisher:
         retained = {revision}
         for number in sorted(sources, reverse=True)[:RELEASE_HISTORY_LIMIT]:
             source = sources[number]
-            size = sum(path.is_file() for path in source.rglob("*"))
-            if count + size > ASSET_FILE_LIMIT:
+            # Legacy signed manifests keep their original URLs. Their PNGs move into
+            # the shared pool, and _redirects serves those URLs without extra copies.
+            icons = {path.name: path for path in (source / "icons").glob("*.png")}
+            missing = {name: path for name, path in icons.items() if not (assets / name).exists()}
+            documents = sum(
+                path.is_file() and path.relative_to(source).parts[0] != "icons"
+                for path in source.rglob("*")
+            )
+            if count + documents + len(missing) > ASSET_FILE_LIMIT:
                 break
             target = releases / str(number)
             if source != target:
-                shutil.copytree(source, target, copy_function=os.link)
+                shutil.copytree(source, target, copy_function=os.link, ignore=shutil.ignore_patterns("icons"))
+            for name, path in missing.items():
+                os.link(path, assets / name)
+            remove_build_directory(target / "icons", root)
             retained.add(number)
-            count += size
+            count += documents + len(missing)
         # A resumed build may still contain the entire archive staged by older code.
         for child in releases.iterdir():
             if child.name.isdecimal() and int(child.name) not in retained:
-                if child.is_symlink() or not child.resolve().is_relative_to(releases.resolve()):
-                    raise PublicationError("Invalid release directory in the deployment build.")
-                shutil.rmtree(child)
+                remove_build_directory(child, root)
         logger.info("Release %s staged with %s assets and %s retained releases", revision, count, len(retained))
 
     def commit_local(self, distribution: Path, revision: int):
         committed = self.config.data_dir / "public"
+        assets = committed / "releases" / "assets"
+        assets.mkdir(parents=True, exist_ok=True)
+        for icon in (distribution / "releases" / "assets").glob("*.png"):
+            if not (assets / icon.name).exists():
+                os.link(icon, assets / icon.name)
         target = committed / "releases" / str(revision)
         shutil.copytree(distribution / "releases" / str(revision), target, dirs_exist_ok=True)
-        for name in ("manifest.json", "mappings.json", "_headers", "latest.json"):
+        for name in ("manifest.json", "mappings.json", "_headers", "_redirects", "latest.json"):
             atomic_write(committed / name, (distribution / name).read_bytes())
 
     def deploy_cloudflare(self, directory: Path, revision: int):
