@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from .imaging import similarity
 from .models import IconImage, MappingDraft, TemplateIdentity, State
-from .store import lock
+from .store import fields, lock
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +23,11 @@ class Maintenance:
                 .join(TemplateIdentity, IconImage.identity_id == TemplateIdentity.id)
                 .order_by(TemplateIdentity.created_at, TemplateIdentity.id, IconImage.sha256)
             ).all()
-            drafts = set(session.scalars(select(MappingDraft.unknown_id)))
             parent = {identity.canonical_id: identity.canonical_id for _, identity in rows}
             formal = {
                 identity.canonical_id: {identity.canonical_id} if identity.kind == "formal" else set()
                 for _, identity in rows
             }
-            protected = {identity.canonical_id for _, identity in rows if identity.id in drafts}
 
         def root(key):
             while parent[key] != key:
@@ -40,11 +38,7 @@ class Maintenance:
         for index, (left, left_identity) in enumerate(rows):
             if stop is not None and stop.is_set():
                 return {"merged": 0, "groups": 0, "stopped": True}
-            if left_identity.canonical_id in protected:
-                continue
             for right, right_identity in rows[index + 1:]:
-                if right_identity.canonical_id in protected:
-                    continue
                 a, b = root(left_identity.canonical_id), root(right_identity.canonical_id)
                 if a == b or len(formal[a] | formal[b]) > 1:
                     continue
@@ -64,12 +58,16 @@ class Maintenance:
             if lock(session, 1, skip_locked=True) is None:
                 return {"merged": 0, "groups": 0, "busy": True}
             identities = list(session.scalars(select(TemplateIdentity).order_by(TemplateIdentity.created_at, TemplateIdentity.id)))
-            draft_ids = set(session.scalars(select(MappingDraft.unknown_id)))
+            drafts = {draft.unknown_id: draft for draft in session.scalars(select(MappingDraft))}
             for component in components:
                 members = [identity for identity in identities if identity.canonical_id in component]
                 canonical = {identity.canonical_id for identity in members}
                 known = {identity.canonical_id for identity in members if identity.kind == "formal"}
-                if len(canonical) < 2 or len(known) > 1 or any(identity.id in draft_ids for identity in members):
+                pending = [drafts[identity.id] for identity in members if identity.id in drafts]
+                draft_values = {(draft.item_id, draft.name, draft.tag) for draft in pending}
+                if len(canonical) < 2 or len(known) > 1 or len(draft_values) > 1:
+                    continue
+                if known and pending and pending[0].item_id not in known:
                     continue
                 target = next(iter(known)) if known else members[0].canonical_id
                 representative = next(identity for identity in members if identity.canonical_id == target)
@@ -77,6 +75,11 @@ class Maintenance:
                     identity.canonical_id = target
                     identity.kind = "formal" if known else "temporary"
                     identity.name, identity.tag = representative.name, representative.tag
+                    if pending and identity.id.startswith("U-"):
+                        session.merge(MappingDraft(
+                            unknown_id=identity.id, updated_at=pending[0].updated_at,
+                            **fields(pending[0], "item_id", "name", "tag"),
+                        ))
                 merged += len(canonical) - 1
                 groups += 1
             if merged:
