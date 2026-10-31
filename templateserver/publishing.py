@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -16,6 +17,16 @@ from .imaging import THRESHOLDS
 from .models import Mapping, MappingDraft, PublishRequest, Release, State, TemplateIdentity
 from .signing import envelope, load_key
 from .store import Store, emit, fields, json_bytes, lock, snapshot, utcnow
+
+
+logger = logging.getLogger(__name__)
+ASSET_FILE_LIMIT = 20_000
+ASSET_SIZE_LIMIT = 25 * 1024 * 1024
+RELEASE_HISTORY_LIMIT = 50
+
+
+class PublicationError(RuntimeError):
+    """A deployment diagnostic that is safe to display in administration."""
 
 
 def atomic_write(path: Path, data: bytes):
@@ -64,13 +75,17 @@ class Publisher:
                 self.commit_local(distribution, release.revision)
                 self.activate(release)
                 return release.revision
-            except Exception:
+            except Exception as error:
                 with self.store.session.begin() as session:
                     row = session.get(Release, release.revision)
                     if row.status != "deployed":
                         first_failure = row.status != "failed"
                         row.status = "failed"
-                        row.error = "Deployment failed; previous revision remains active. Retry is automatic."
+                        row.error = (
+                            str(error)
+                            if isinstance(error, PublicationError)
+                            else "Deployment failed; previous revision remains active. Retry is automatic."
+                        )
                         if first_failure:
                             emit(
                                 session,
@@ -120,9 +135,6 @@ class Publisher:
 
     def render(self, release: Release):
         root = self.config.data_dir / "builds" / str(release.revision)
-        committed = self.config.data_dir / "public"
-        if not root.exists() and committed.exists():
-            shutil.copytree(committed, root, copy_function=os.link)
         directory = root / "releases" / str(release.revision)
         payload = release.payload
         entries = []
@@ -158,7 +170,7 @@ class Publisher:
                 select(Release)
                 .where(Release.status == "deployed")
                 .order_by(Release.revision.desc())
-                .limit(50)
+                .limit(RELEASE_HISTORY_LIMIT)
             ).all()
         for prior in [None, *previous]:
             from_revision = prior.revision if prior else 0
@@ -180,7 +192,42 @@ class Publisher:
             root / "_headers",
             b"/*\n  Access-Control-Allow-Origin: *\n  X-Content-Type-Options: nosniff\n/releases/*\n  Cache-Control: public, max-age=31536000, immutable\n/latest.json\n  Cache-Control: public, max-age=0, must-revalidate\n",
         )
+        self.retain_history(root, release.revision)
         return root
+
+    def retain_history(self, root: Path, revision: int):
+        """Stage recent releases within the asset budget; leave the local archive intact."""
+        releases = root / "releases"
+        archive = self.config.data_dir / "public" / "releases"
+        current = releases / str(revision)
+        count = sum(path.is_file() for path in current.rglob("*"))
+        count += sum(path.is_file() for path in root.iterdir())
+        sources = {}
+        for parent in (archive, releases):
+            if parent.exists():
+                for child in parent.iterdir():
+                    if child.is_dir() and not child.is_symlink() and child.name.isdecimal():
+                        number = int(child.name)
+                        if number < revision:
+                            sources[number] = child
+        retained = {revision}
+        for number in sorted(sources, reverse=True)[:RELEASE_HISTORY_LIMIT]:
+            source = sources[number]
+            size = sum(path.is_file() for path in source.rglob("*"))
+            if count + size > ASSET_FILE_LIMIT:
+                break
+            target = releases / str(number)
+            if source != target:
+                shutil.copytree(source, target, copy_function=os.link)
+            retained.add(number)
+            count += size
+        # A resumed build may still contain the entire archive staged by older code.
+        for child in releases.iterdir():
+            if child.name.isdecimal() and int(child.name) not in retained:
+                if child.is_symlink() or not child.resolve().is_relative_to(releases.resolve()):
+                    raise PublicationError("Invalid release directory in the deployment build.")
+                shutil.rmtree(child)
+        logger.info("Release %s staged with %s assets and %s retained releases", revision, count, len(retained))
 
     def commit_local(self, distribution: Path, revision: int):
         committed = self.config.data_dir / "public"
@@ -190,6 +237,16 @@ class Publisher:
             atomic_write(committed / name, (distribution / name).read_bytes())
 
     def deploy_cloudflare(self, directory: Path, revision: int):
+        assets = [path for path in directory.rglob("*") if path.is_file()]
+        if len(assets) > ASSET_FILE_LIMIT:
+            raise PublicationError(
+                f"Deployment contains {len(assets)} static assets; the limit is {ASSET_FILE_LIMIT}."
+            )
+        for path in assets:
+            if path.stat().st_size > ASSET_SIZE_LIMIT:
+                raise PublicationError(
+                    f"Static asset {path.relative_to(directory)} exceeds the 25 MiB file limit."
+                )
         config_path = self.config.data_dir / "wrangler.generated.json"
         config = {
             "name": self.config.worker_name,
@@ -215,7 +272,19 @@ class Publisher:
             check=False,
         )
         if result.returncode:
-            raise RuntimeError(f"Wrangler deployment failed with exit code {result.returncode}")
+            diagnostic = (result.stdout + b"\n" + result.stderr).decode("utf-8", "replace")
+            for secret in (
+                self.config.admin_token,
+                self.config.event_token,
+                self.config.database_url,
+                os.getenv("CLOUDFLARE_API_TOKEN", ""),
+            ):
+                if secret:
+                    diagnostic = diagnostic.replace(secret, "[redacted]")
+            logger.error("Wrangler deployment failed: %s", diagnostic[-8192:])
+            raise PublicationError(
+                f"Wrangler deployment failed (exit {result.returncode}); see template server logs. Retry is automatic."
+            )
         expected = json.loads((directory / "latest.json").read_bytes())
         with httpx.Client(timeout=20, follow_redirects=False, trust_env=False) as client:
             response = client.get(self.config.public_base + "/latest.json")
