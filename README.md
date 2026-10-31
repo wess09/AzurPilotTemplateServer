@@ -1,6 +1,6 @@
-# AzurPilotCloud
+# AzurPilotTemplateServer
 
-AzurPilotCloud 是《碧蓝航线》AzurPilot 的物品图标模板服务器。它接收客户端提交的图标，维护模板编号和物品映射，并生成供客户端下载的模板资源。
+AzurPilotTemplateServer 是《碧蓝航线》AzurPilot 的物品图标模板服务器。它接收客户端提交的图标，维护模板编号和物品映射，并生成供客户端下载的模板资源。
 
 管理界面位于 [AzurPilotCloudWeb](https://github.com/wess09/AzurPilotCloudWeb)，统计服务位于 [AzurPillotCloudServer](https://github.com/wess09/AzurPillotCloudServer)。
 
