@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from .imaging import Icon, match_icon
+from .imaging import THRESHOLDS, Icon, match_icon
 from .models import (
     CoordinationLock,
     IconImage,
@@ -62,6 +62,7 @@ class Store:
             database_url(url), pool_pre_ping=True, pool_size=8, max_overflow=8, hide_parameters=True
         )
         self.session = sessionmaker(self.engine, expire_on_commit=False)
+        self.match_thresholds = dict(THRESHOLDS)
 
     def open(self):
         with self.session() as session:
@@ -95,7 +96,7 @@ class Store:
                     }
                     for sample, target in rows
                 ]
-                matched = match_icon(icon, candidates)
+                matched = match_icon(icon, candidates, self.match_thresholds)
                 identity = session.get(TemplateIdentity, matched["id"]) if matched else None
             created = identity is None
             if created:
@@ -152,9 +153,15 @@ class Store:
     def save_mapping(self, unknown_id: str, body: dict):
         with self.session.begin() as session:
             lock(session, 1)
-            if not unknown_id.startswith("U-") or not session.get(TemplateIdentity, unknown_id):
+            identity = session.get(TemplateIdentity, unknown_id)
+            if not unknown_id.startswith("U-") or not identity:
                 raise DomainError("Unknown template ID does not exist", 404)
-            session.merge(MappingDraft(unknown_id=unknown_id, updated_at=utcnow(), **body))
+            members = session.scalars(
+                select(TemplateIdentity).where(TemplateIdentity.canonical_id == identity.canonical_id)
+            )
+            for member in members:
+                if member.id.startswith("U-"):
+                    session.merge(MappingDraft(unknown_id=member.id, updated_at=utcnow(), **body))
 
     def save_screenshot(self, digest: str, png: bytes, scene: str, client: str, references: list[dict]):
         with self.session.begin() as session:
@@ -185,8 +192,10 @@ class Store:
 
     def screenshots(self, identity_id: str, limit: int, offset: int):
         with self.session() as session:
-            if session.get(TemplateIdentity, identity_id) is None:
+            identity = session.get(TemplateIdentity, identity_id)
+            if identity is None:
                 raise DomainError("Template not found", 404)
+            members = select(TemplateIdentity.id).where(TemplateIdentity.canonical_id == identity.canonical_id)
             rows = session.execute(
                 select(
                     Screenshot.sha256,
@@ -198,7 +207,8 @@ class Store:
                     ScreenshotReference.y2,
                 )
                 .join(ScreenshotReference, ScreenshotReference.screenshot_sha256 == Screenshot.sha256)
-                .where(ScreenshotReference.identity_id == identity_id)
+                .where(ScreenshotReference.identity_id.in_(members))
+                .distinct()
                 .order_by(
                     Screenshot.created_at.desc(),
                     Screenshot.sha256,
@@ -251,7 +261,8 @@ class Store:
             state["templates"] = [
                 dict(row._mapping)
                 for row in session.execute(
-                    select(TemplateIdentity.kind, func.count().label("count")).group_by(TemplateIdentity.kind)
+                    select(TemplateIdentity.kind, func.count(func.distinct(TemplateIdentity.canonical_id)).label("count"))
+                    .group_by(TemplateIdentity.kind)
                 )
             ]
             state["drafts"] = session.scalar(select(func.count()).select_from(MappingDraft))
@@ -280,38 +291,37 @@ class Store:
 
     def templates(self, kind: str | None, limit: int, offset: int):
         with self.session() as session:
-            statement = select(TemplateIdentity).order_by(
-                TemplateIdentity.created_at.desc(), TemplateIdentity.id
+            statement = select(TemplateIdentity.canonical_id).group_by(TemplateIdentity.canonical_id).order_by(
+                func.max(TemplateIdentity.created_at).desc(), TemplateIdentity.canonical_id
             )
             if kind:
                 statement = statement.where(TemplateIdentity.kind == kind)
             result = []
-            rows = list(session.scalars(statement.limit(limit).offset(offset)))
-            counts = dict(
-                session.execute(
-                    select(
-                        ScreenshotReference.identity_id,
-                        func.count(func.distinct(ScreenshotReference.screenshot_sha256)),
-                    )
-                    .where(ScreenshotReference.identity_id.in_([row.id for row in rows]))
-                    .group_by(ScreenshotReference.identity_id)
-                ).all()
-            )
-            for row in rows:
-                item = fields(
-                    row, "id", "canonical_id", "name", "tag", "kind", "hits", "created_at", "last_seen"
-                )
-                draft = session.get(MappingDraft, row.id)
+            canonical_ids = list(session.scalars(statement.limit(limit).offset(offset)))
+            members = list(session.scalars(
+                select(TemplateIdentity).where(TemplateIdentity.canonical_id.in_(canonical_ids))
+                .order_by(TemplateIdentity.created_at, TemplateIdentity.id)
+            ))
+            for canonical_id in canonical_ids:
+                group = [member for member in members if member.canonical_id == canonical_id]
+                row = next((member for member in group if member.id == canonical_id), group[0])
+                member_ids = [member.id for member in group]
+                item = fields(row, "id", "canonical_id", "name", "tag", "kind", "created_at")
+                item["hits"] = sum(member.hits for member in group)
+                item["last_seen"] = max(member.last_seen for member in group)
+                item["aliases"] = [member.id for member in group if member.id != row.id]
+                draft = session.scalar(select(MappingDraft).where(MappingDraft.unknown_id.in_(member_ids)).limit(1))
                 item["draft"] = fields(draft, "item_id", "name", "tag") if draft else None
                 image = session.scalar(
-                    select(IconImage)
-                    .where(IconImage.identity_id == row.id)
-                    .order_by(IconImage.created_at, IconImage.sha256)
-                    .limit(1)
+                    select(IconImage).where(IconImage.identity_id.in_(member_ids))
+                    .order_by(IconImage.created_at, IconImage.sha256).limit(1)
                 )
                 item["icon_sha256"] = image.sha256 if image else None
                 item["image_base64"] = base64.b64encode(image.png).decode() if image else None
-                item["screenshot_count"] = counts.get(row.id, 0)
+                item["screenshot_count"] = session.scalar(
+                    select(func.count(func.distinct(ScreenshotReference.screenshot_sha256)))
+                    .where(ScreenshotReference.identity_id.in_(member_ids))
+                )
                 result.append(item)
             return result
 
@@ -342,11 +352,31 @@ class Store:
 
 
 def snapshot(session: Session, approved: list[dict]) -> dict:
-    mappings = {
-        row.unknown_id: fields(row, "unknown_id", "item_id", "name", "tag")
-        for row in session.scalars(select(Mapping))
-    }
-    mappings.update({row["unknown_id"]: row for row in approved})
+    identities = {row.id: row for row in session.scalars(select(TemplateIdentity))}
+    overrides = {}
+    for row in approved:
+        identity = identities[row["unknown_id"]]
+        old = overrides.get(identity.canonical_id)
+        if old and not fields_equal(old, row):
+            raise DomainError("Merged templates have conflicting mapping drafts")
+        overrides[identity.canonical_id] = row
+    mappings, expanded = {}, []
+    for identity in identities.values():
+        override = overrides.get(identity.canonical_id)
+        if not identity.id.startswith("U-"):
+            continue
+        target = override["item_id"] if override else identity.canonical_id
+        if target == identity.id:
+            continue
+        mapping = {
+            "unknown_id": identity.id,
+            "item_id": target,
+            "name": override["name"] if override else identity.name or target,
+            "tag": override["tag"] if override else identity.tag,
+        }
+        mappings[identity.id] = mapping
+        if override:
+            expanded.append(mapping)
     templates = []
     rows = session.execute(
         select(IconImage, TemplateIdentity)
@@ -359,7 +389,7 @@ def snapshot(session: Session, approved: list[dict]) -> dict:
             {
                 "identity_id": identity.id,
                 "template_id": mapping["item_id"] if mapping else identity.canonical_id,
-                "kind": "formal" if mapping else identity.kind,
+                "kind": "formal" if mapping and not mapping["item_id"].startswith("U-") else identity.kind,
                 "name": mapping["name"] if mapping else identity.name,
                 "tag": mapping["tag"] if mapping else identity.tag,
                 "icon_sha256": icon.sha256,
@@ -369,8 +399,12 @@ def snapshot(session: Session, approved: list[dict]) -> dict:
     return {
         "templates": templates,
         "mappings": sorted(mappings.values(), key=lambda row: row["unknown_id"]),
-        "approved": approved,
+        "approved": expanded,
     }
+
+
+def fields_equal(left, right):
+    return all(left[key] == right[key] for key in ("item_id", "name", "tag"))
 
 
 def json_bytes(value) -> bytes:

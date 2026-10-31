@@ -61,7 +61,15 @@ def decode_icon(encoded: str, *, allow_cell: bool = False) -> Icon:
     )
 
 
-THRESHOLDS = {"formal": 0.92, "cluster": 0.96, "margin": 0.03, "phash_distance": 6, "color": 30}
+THRESHOLDS = {"formal": 0.92, "cluster": 0.85, "margin": 0.03, "phash_distance": 6, "color": 30}
+
+
+def similarity(left: bytes, right: bytes, left_stddev: float, right_stddev: float) -> float:
+    query = np.frombuffer(left, np.uint8).reshape(49, 49, 3)
+    candidate = np.frombuffer(right, np.uint8).reshape(49, 49, 3)
+    if min(left_stddev, right_stddev) < 5:
+        return 1 - float(np.sqrt(np.mean((query.astype(float) - candidate) ** 2))) / 255
+    return float(cv2.matchTemplate(query, candidate, cv2.TM_CCOEFF_NORMED)[0, 0])
 
 
 def decode_screenshot(encoded: str) -> tuple[str, bytes]:
@@ -84,21 +92,16 @@ def decode_screenshot(encoded: str) -> tuple[str, bytes]:
 
 def match_icon(icon: Icon, rows: list[dict], thresholds: dict | None = None) -> dict | None:
     limits = thresholds or THRESHOLDS
-    query = np.frombuffer(icon.pixels, np.uint8).reshape(49, 49, 3)
     for kind in ("formal", "temporary"):
         scores: dict[str, tuple[float, dict]] = {}
         for row in rows:
             if row["kind"] != kind:
                 continue
-            if (int(row["phash"], 16) ^ int(icon.phash, 16)).bit_count() > limits["phash_distance"]:
+            if kind == "formal" and (int(row["phash"], 16) ^ int(icon.phash, 16)).bit_count() > limits["phash_distance"]:
                 continue
-            if np.max(np.abs(np.array(row["mean"]) - icon.mean)) > limits["color"]:
+            if kind == "formal" and np.max(np.abs(np.array(row["mean"]) - icon.mean)) > limits["color"]:
                 continue
-            candidate = np.frombuffer(row["pixels"], np.uint8).reshape(49, 49, 3)
-            if min(icon.stddev, row["stddev"]) < 5:
-                score = 1 - float(np.sqrt(np.mean((query.astype(float) - candidate) ** 2))) / 255
-            else:
-                score = float(cv2.matchTemplate(query, candidate, cv2.TM_CCOEFF_NORMED)[0, 0])
+            score = similarity(icon.pixels, row["pixels"], icon.stddev, row["stddev"])
             # Multiple variants of one identity cannot compete with each other for the margin.
             key = row["canonical_id"]
             if key not in scores or score > scores[key][0]:
@@ -107,6 +110,6 @@ def match_icon(icon: Icon, rows: list[dict], thresholds: dict | None = None) -> 
         threshold = limits["formal" if kind == "formal" else "cluster"]
         if ranked and ranked[0][0] >= threshold:
             runner_up = ranked[1][0] if len(ranked) > 1 else -1
-            if ranked[0][0] - runner_up >= limits["margin"]:
+            if kind == "temporary" or ranked[0][0] - runner_up >= limits["margin"]:
                 return ranked[0][1]
     return None

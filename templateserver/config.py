@@ -17,6 +17,8 @@ class Config:
     worker_name: str = "azurpilot-templates"
     wrangler: str = "node_modules/wrangler/bin/wrangler.js"
     auto_publish_seconds: float = 3
+    auto_merge_seconds: float = 600
+    merge_similarity: float = 0.85
 
     @classmethod
     def from_env(cls):
@@ -36,11 +38,15 @@ class Config:
             worker_name=os.getenv("CF_WORKER_NAME", "azurpilot-templates"),
             wrangler=os.getenv("WRANGLER_SCRIPT", "node_modules/wrangler/bin/wrangler.js"),
             auto_publish_seconds=float(os.getenv("AUTO_PUBLISH_SECONDS", "3")),
+            auto_merge_seconds=float(os.getenv("AUTO_MERGE_SECONDS", "600")),
+            merge_similarity=float(os.getenv("TEMPLATE_MERGE_SIMILARITY", "0.85")),
         )
         if cfg.deploy_mode not in {"local", "cloudflare"}:
             raise ValueError("DEPLOY_MODE must be local or cloudflare")
         if cfg.auto_publish_seconds < 0.1:
             raise ValueError("AUTO_PUBLISH_SECONDS must be >= 0.1")
+        if cfg.auto_merge_seconds < 1 or not 0 < cfg.merge_similarity <= 1:
+            raise ValueError("AUTO_MERGE_SECONDS must be >= 1 and TEMPLATE_MERGE_SIMILARITY must be in (0, 1]")
         for origin in cfg.admin_origins:
             parsed = urlparse(origin)
             if (

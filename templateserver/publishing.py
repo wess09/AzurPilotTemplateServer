@@ -127,7 +127,7 @@ class Publisher:
                 return None
             payload = snapshot(session, request.mappings if request else [])
             payload["created_at"] = utcnow().isoformat()
-            payload["match_thresholds"] = dict(THRESHOLDS)
+            payload["match_thresholds"] = {**THRESHOLDS, "cluster": self.config.merge_similarity}
             release = Release(
                 status="building",
                 generation=state.generation,
@@ -333,8 +333,13 @@ class Publisher:
             row = session.get(Release, release.revision)
             if row.status == "deployed":
                 return
-            for mapping in row.payload["approved"]:
+            state = session.get(State, 1)
+            prior = session.get(Release, state.revision) if state.revision else None
+            previous = {mapping["unknown_id"]: mapping for mapping in prior.payload["mappings"]} if prior else {}
+            changed = [mapping for mapping in row.payload["mappings"] if previous.get(mapping["unknown_id"]) != mapping]
+            for mapping in row.payload["mappings"]:
                 session.merge(Mapping(**mapping, revision=row.revision))
+            for mapping in row.payload["approved"]:
                 identity = session.get(TemplateIdentity, mapping["unknown_id"])
                 identity.canonical_id, identity.name, identity.tag = (
                     mapping["item_id"],
@@ -345,7 +350,6 @@ class Publisher:
                 draft = session.get(MappingDraft, mapping["unknown_id"])
                 if draft and fields(draft, "unknown_id", "item_id", "name", "tag") == mapping:
                     session.delete(draft)
-            state = session.get(State, 1)
             state.revision = row.revision
             state.published_generation = row.generation
             row.status, row.error, row.deployed_at = "deployed", "", utcnow()
@@ -355,9 +359,8 @@ class Publisher:
                 row.revision,
                 {
                     "revision": row.revision,
-                    # Only newly approved mappings travel to the paid main server. Worker documents
-                    # remain cumulative so offline clients can recover all historical aliases.
-                    "replace_ids": row.payload["approved"],
+                    # Replicate changed aliases, including U-ID consolidation and later formalization.
+                    "replace_ids": changed,
                     "template_count": len(row.payload["templates"]),
                     "manifest_url": f"{self.config.public_base}/releases/{row.revision}/manifest.json",
                 },

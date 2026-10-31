@@ -15,6 +15,7 @@ from .admin import AdminSocket
 from .config import Config
 from .delivery import Delivery
 from .imaging import decode_icon, decode_screenshot
+from .maintenance import Maintenance
 from .publishing import Publisher
 from .schemas import ScreenshotUpload, UnknownBatch, UnknownUpload
 from .store import DomainError, Store
@@ -82,10 +83,20 @@ def create_app(
 ):
     config = config or Config.from_env()
     store = store or Store(config.database_url)
+    store.match_thresholds["cluster"] = config.merge_similarity
     publisher = publisher or Publisher(store, config)
     delivery = Delivery(store, config)
     stop = threading.Event()
     rate = rate_limiter or RateLimiter()
+    maintenance = Maintenance(store, config.merge_similarity)
+
+    def run_maintenance():
+        while not stop.is_set():
+            try:
+                maintenance.run_once(stop)
+            except Exception:
+                logger.exception("Automatic template merge failed; retry pending")
+            stop.wait(config.auto_merge_seconds)
 
     def run_publication():
         failures = 0
@@ -115,6 +126,7 @@ def create_app(
         threads = []
         if background:
             threads = [
+                threading.Thread(target=run_maintenance, name="template-maintenance"),
                 threading.Thread(target=run_publication, name="template-publisher"),
                 threading.Thread(target=run_delivery, name="template-delivery"),
             ]

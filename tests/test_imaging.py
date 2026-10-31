@@ -53,4 +53,4 @@ def test_colored_flat_icons_cannot_get_false_ncc_one():
 
     original, different = flat(100), flat(125)
     assert original.stddev == 0
-    assert match_icon(different, [candidate(original)]) is None
+    assert match_icon(different, [candidate(original, kind="formal")]) is None
