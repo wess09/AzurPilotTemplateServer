@@ -33,6 +33,12 @@ class ListTemplates(StrictModel):
     kind: Literal["formal", "temporary"] | None = None
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0)
+    discarded: bool = False
+
+
+class DiscardTemplate(StrictModel):
+    identity_id: str = Field(min_length=1, max_length=128)
+    discarded: bool
 
 
 class SaveMapping(MappingBody):
@@ -76,7 +82,10 @@ class AdminSocket:
             return self.snapshot()
         if method == "templates.list":
             body = ListTemplates.model_validate(params)
-            return {"items": self.store.templates(body.kind, body.limit, body.offset)}
+            return {"items": self.store.templates(body.kind, body.limit, body.offset, body.discarded)}
+        if method == "templates.discard":
+            body = DiscardTemplate.model_validate(params)
+            return self.store.set_discarded(body.identity_id, body.discarded)
         if method == "templates.import":
             from .imaging import decode_icon
 

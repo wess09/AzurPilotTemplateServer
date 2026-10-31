@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -47,6 +48,7 @@ class TemplateIdentity(Base):
     name: Mapped[str] = mapped_column(String(128), default="")
     tag: Mapped[str] = mapped_column(String(32), default="")
     kind: Mapped[str] = mapped_column(Enum("temporary", "formal", name="template_kind"))
+    discarded: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), index=True)
     hits: Mapped[int] = mapped_column(BigInteger, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

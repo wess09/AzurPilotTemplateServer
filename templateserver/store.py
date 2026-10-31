@@ -83,6 +83,11 @@ class Store:
                     raise DomainError(f"Icon already belongs to {identity.id}; create a mapping instead")
                 if not identity:
                     identity = session.get(TemplateIdentity, formal["item_id"])
+                    if identity is None:
+                        identity = session.scalar(
+                            select(TemplateIdentity).where(TemplateIdentity.canonical_id == formal["item_id"])
+                            .order_by(TemplateIdentity.discarded, TemplateIdentity.created_at).limit(1)
+                        )
             elif not identity:
                 rows = session.execute(
                     select(IconImage, TemplateIdentity).join(
@@ -91,13 +96,30 @@ class Store:
                 ).all()
                 candidates = [
                     {
-                        **fields(target, "id", "canonical_id", "kind"),
+                        **fields(target, "id", "canonical_id", "kind", "discarded"),
                         **fields(sample, "pixels", "phash", "mean", "stddev"),
                     }
                     for sample, target in rows
                 ]
-                matched = match_icon(icon, candidates, self.match_thresholds)
+                matched = match_icon(icon, [row for row in candidates if not row["discarded"]], self.match_thresholds)
+                if matched is None:
+                    matched = match_icon(icon, [{**row, "kind": "temporary"} for row in candidates if row["discarded"]], self.match_thresholds)
                 identity = session.get(TemplateIdentity, matched["id"]) if matched else None
+            if identity and identity.discarded:
+                if formal:
+                    raise DomainError("模板已丢弃，请先恢复再导入")
+                state = session.get(State, 1)
+                # Keep the acknowledgement compatible with existing clients without registering
+                # another identity or admitting this image into the recognition catalog.
+                return {
+                    "match": "formal" if identity.kind == "formal" else "cluster",
+                    "template_id": identity.canonical_id,
+                    "identity_id": identity.id,
+                    "item_id": identity.canonical_id if identity.kind == "formal" else None,
+                    "name": identity.name, "tag": identity.tag, "discarded": True,
+                    "revision": state.revision,
+                    "publication_pending": state.generation > state.published_generation,
+                }
             created = identity is None
             if created:
                 identity_id = formal["item_id"] if formal else "U-" + secrets.token_hex(6).upper()
@@ -156,12 +178,35 @@ class Store:
             identity = session.get(TemplateIdentity, unknown_id)
             if not unknown_id.startswith("U-") or not identity:
                 raise DomainError("Unknown template ID does not exist", 404)
+            if identity.discarded:
+                raise DomainError("模板已丢弃，请先恢复")
             members = session.scalars(
                 select(TemplateIdentity).where(TemplateIdentity.canonical_id == identity.canonical_id)
             )
             for member in members:
                 if member.id.startswith("U-"):
                     session.merge(MappingDraft(unknown_id=member.id, updated_at=utcnow(), **body))
+
+    def set_discarded(self, identity_id: str, discarded: bool):
+        with self.session.begin() as session:
+            lock(session, 1)
+            identity = session.get(TemplateIdentity, identity_id)
+            if identity is None:
+                raise DomainError("Template not found", 404)
+            members = list(session.scalars(
+                select(TemplateIdentity).where(TemplateIdentity.canonical_id == identity.canonical_id)
+            ))
+            changed = False
+            for member in members:
+                changed |= member.discarded != discarded
+                member.discarded = discarded
+                if discarded:
+                    draft = session.get(MappingDraft, member.id)
+                    if draft:
+                        session.delete(draft)
+            if changed:
+                session.get(State, 1).generation += 1
+            return {"discarded": discarded, "identities": len(members), "published": False}
 
     def save_screenshot(self, digest: str, png: bytes, scene: str, client: str, references: list[dict]):
         with self.session.begin() as session:
@@ -262,6 +307,7 @@ class Store:
                 dict(row._mapping)
                 for row in session.execute(
                     select(TemplateIdentity.kind, func.count(func.distinct(TemplateIdentity.canonical_id)).label("count"))
+                    .where(TemplateIdentity.discarded.is_(False))
                     .group_by(TemplateIdentity.kind)
                 )
             ]
@@ -293,9 +339,9 @@ class Store:
             )
             return state
 
-    def templates(self, kind: str | None, limit: int, offset: int):
+    def templates(self, kind: str | None, limit: int, offset: int, discarded: bool = False):
         with self.session() as session:
-            statement = select(TemplateIdentity.canonical_id).group_by(TemplateIdentity.canonical_id).order_by(
+            statement = select(TemplateIdentity.canonical_id).where(TemplateIdentity.discarded == discarded).group_by(TemplateIdentity.canonical_id).order_by(
                 func.max(TemplateIdentity.created_at).desc(), TemplateIdentity.canonical_id
             )
             if kind:
@@ -310,7 +356,7 @@ class Store:
                 group = [member for member in members if member.canonical_id == canonical_id]
                 row = next((member for member in group if member.id == canonical_id), group[0])
                 member_ids = [member.id for member in group]
-                item = fields(row, "id", "canonical_id", "name", "tag", "kind", "created_at")
+                item = fields(row, "id", "canonical_id", "name", "tag", "kind", "created_at", "discarded")
                 item["hits"] = sum(member.hits for member in group)
                 item["last_seen"] = max(member.last_seen for member in group)
                 item["aliases"] = [member.id for member in group if member.id != row.id]
@@ -365,6 +411,8 @@ def snapshot(session: Session, approved: list[dict]) -> dict:
     overrides = {}
     for row in approved:
         identity = identities[row["unknown_id"]]
+        if identity.discarded:
+            continue
         old = overrides.get(identity.canonical_id)
         if old and not fields_equal(old, row):
             raise DomainError("Merged templates have conflicting mapping drafts")
@@ -390,6 +438,7 @@ def snapshot(session: Session, approved: list[dict]) -> dict:
     rows = session.execute(
         select(IconImage, TemplateIdentity)
         .join(TemplateIdentity, IconImage.identity_id == TemplateIdentity.id)
+        .where(TemplateIdentity.discarded.is_(False))
         .order_by(TemplateIdentity.id, IconImage.sha256)
     )
     for icon, identity in rows:

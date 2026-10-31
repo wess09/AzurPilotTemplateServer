@@ -74,6 +74,8 @@
 
 Worker 部署包包含当前完整版本及最近最多 50 个历史版本目录，总文件数不超过 20,000；达到预算时从最旧的历史目录开始退出公开部署。数据库和服务器本地发布归档保留完整历史。旧版本资源不存在时，客户端重新获取 `latest.json` 并使用当前完整版本；累计 `replace_ids` 不受历史目录裁剪影响。单个静态文件最大 25 MiB，超限时保留原线上版本并在管理端报告错误。
 
+`CF_WORKER_DOMAIN` 默认使用 Custom Domain。域名已配置 CNAME 或 A 记录并通过 Worker 路由访问时，设置 `CF_WORKER_ZONE_NAME` 为所属区域名，发布沿用 `<域名>/*` 路由，不尝试创建冲突的 Custom Domain，也不修改已有 DNS 记录。
+
 旧版本已签名清单中的 `/releases/<revision>/icons/<hash>.png` 由 Worker 静态资源规则内部改写到共享图标路径，返回原始 PNG 和 HTTP 200，不要求客户端跟随重定向，也不改变已发布清单的签名。
 
 模板条目的稳定槽位键为 `identity_id:icon_sha256`。映射后该槽位的 `template_id` 从 U-ID 替换为正式 ID，并保留同一图标。读取器优先正式模板，再读临时模板。
@@ -81,6 +83,8 @@ Worker 部署包包含当前完整版本及最近最多 50 个历史版本目录
 服务启动后执行一次重复模板扫描，此后默认每 600 秒执行一次；`AUTO_MERGE_SECONDS=1800` 可改为每半小时。使用与在线匹配一致的图像相关性评分，默认 `TEMPLATE_MERGE_SIMILARITY=0.85`。达到阈值的临时模板合并为同一组，优先沿用已有正式编号，否则保留组内最早的 U-ID；不同正式物品编号不会相互合并。已有人工映射草稿会保留并扩展至同组旧编号，互相冲突的人工映射不被自动覆盖。
 
 源 `identity_id`、图标变体、命中次数及原图关联保留；管理列表按合并后的 `canonical_id` 显示一行。发布清单将所有旧 U-ID 直接映射到最终编号，避免多级映射；以后将保留的 U-ID 指定为正式物品时，组内旧编号一并转为该正式物品。自动合并产生新发布版本，确认 Worker 部署后再向主服务发送变化的映射，由主服务重算受影响的历史统计。
+
+管理员可丢弃无效模板，操作作用于同一 `canonical_id` 下的全部合并编号。丢弃后不参与在线匹配和自动合并，当前清单与增量移除这些图标条目，未发布的映射草稿清除。历史编号、已发布映射、命中次数与原图保留，不删除或改写历史统计。重复上传已丢弃的相同或相似图标不会重新建号或恢复模板；兼容旧客户端的上传确认附带 `discarded:true`。管理员恢复后以原编号重新进入后续发布。
 
 `replace_ids` 示例：
 
@@ -127,7 +131,8 @@ Worker 部署包包含当前完整版本及最近最多 50 个历史版本目录
 | 模板服务方法 | 参数 |
 |---|---|
 | `state.get` / `state.subscribe` / `status.get` / `ping` | 空对象 |
-| `templates.list` | 可选 `kind` formal/temporary、`limit` 1–200 默认50、`offset` 默认0 |
+| `templates.list` | 可选 `kind` formal/temporary、`limit` 1–200 默认50、`offset` 默认0、`discarded` 默认 false |
+| `templates.discard` | `identity_id,discarded`；true 丢弃同组模板，false 恢复，自动排队发布 |
 | `templates.import` | `item_id,name,image_base64`，可选 `tag` |
 | `mappings.save` | `unknown_id,item_id,name`，可选 `tag` |
 | `publish` | 可选 `note`，返回排队任务 ID |

@@ -296,7 +296,11 @@ class Publisher:
         }
         domain = os.getenv("CF_WORKER_DOMAIN", "")
         if domain:
-            config["routes"] = [{"pattern": domain, "custom_domain": True}]
+            zone = os.getenv("CF_WORKER_ZONE_NAME", "")
+            config["routes"] = (
+                [{"pattern": domain + "/*", "zone_name": zone}]
+                if zone else [{"pattern": domain, "custom_domain": True}]
+            )
         atomic_write(config_path, json_bytes(config))
         result = subprocess.run(
             [
@@ -322,6 +326,10 @@ class Publisher:
                 if secret:
                     diagnostic = diagnostic.replace(secret, "[redacted]")
             logger.error("Wrangler deployment failed: %s", diagnostic[-8192:])
+            if "100117" in diagnostic:
+                raise PublicationError(
+                    "域名已有 DNS 记录，与 Custom Domain 冲突；使用现有 Worker 路由时请配置 CF_WORKER_ZONE_NAME。"
+                )
             raise PublicationError(
                 f"Wrangler deployment failed (exit {result.returncode}); see template server logs. Retry is automatic."
             )

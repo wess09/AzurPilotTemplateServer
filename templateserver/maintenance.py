@@ -21,6 +21,7 @@ class Maintenance:
             rows = session.execute(
                 select(IconImage, TemplateIdentity)
                 .join(TemplateIdentity, IconImage.identity_id == TemplateIdentity.id)
+                .where(TemplateIdentity.discarded.is_(False))
                 .order_by(TemplateIdentity.created_at, TemplateIdentity.id, IconImage.sha256)
             ).all()
             parent = {identity.canonical_id: identity.canonical_id for _, identity in rows}
@@ -56,7 +57,10 @@ class Maintenance:
         merged, groups = 0, 0
         with self.store.session.begin() as session:
             lock(session, 1)
-            identities = list(session.scalars(select(TemplateIdentity).order_by(TemplateIdentity.created_at, TemplateIdentity.id)))
+            identities = list(session.scalars(
+                select(TemplateIdentity).where(TemplateIdentity.discarded.is_(False))
+                .order_by(TemplateIdentity.created_at, TemplateIdentity.id)
+            ))
             drafts = {draft.unknown_id: draft for draft in session.scalars(select(MappingDraft))}
             for component in components:
                 members = [identity for identity in identities if identity.canonical_id in component]
