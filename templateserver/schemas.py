@@ -1,6 +1,7 @@
 import re
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,127}$")
 
@@ -42,10 +43,40 @@ class ScreenshotUpload(StrictModel):
     client: str = Field(default="", max_length=64)
 
 
+ITEM_UNITS = {
+    "blueprint-rainbow": "张", "blueprint-gold": "张", "gear-rainbow": "张", "gear-gold": "张", "gear-other": "张",
+    "cube": "个", "coins": "物资", "oil": "石油", "chips": "个", "book": "本", "plate": "个", "retrofit": "张",
+    "box": "个", "gems": "个", "drills": "个", "decor": "个",
+}
+
+
+class ItemMetadata(StrictModel):
+    category: str = Field(min_length=1, max_length=32)
+    rarity: int = Field(default=0, ge=0, le=5)
+    series: int = Field(default=0, ge=0, le=100)
+    version: str = Field(default="", max_length=64)
+    unit: str = Field(min_length=1, max_length=16)
+    scenes: list[Literal["research", "commission"]] = Field(min_length=1, max_length=2)
+    game_id: str = Field(default="", max_length=64)
+    faction: str = Field(default="", max_length=64)
+    subtype: str = Field(default="", max_length=64)
+
+    @model_validator(mode="after")
+    def coherent_category(self):
+        if ITEM_UNITS.get(self.category) != self.unit:
+            raise ValueError("物品分类与计量单位不匹配")
+        expected = 5 if self.category.endswith("rainbow") else 4 if self.category.endswith("gold") else None
+        if expected and self.rarity != expected:
+            raise ValueError("蓝图分类与稀有度不匹配")
+        self.scenes = sorted(set(self.scenes))
+        return self
+
+
 class MappingBody(StrictModel):
     item_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=128)
     tag: str = Field(default="", max_length=32)
+    metadata: ItemMetadata | None = None
 
     @field_validator("item_id")
     @classmethod

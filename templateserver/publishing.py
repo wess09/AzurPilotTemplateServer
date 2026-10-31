@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from .config import Config
 from .imaging import THRESHOLDS
-from .models import Mapping, MappingDraft, PublishRequest, Release, State, TemplateIdentity
+from .models import ItemDefinition, Mapping, MappingDraft, PublishRequest, Release, State, TemplateIdentity
 from .signing import envelope, load_key
 from .store import Store, emit, fields, json_bytes, lock, snapshot, utcnow
 
@@ -169,6 +169,7 @@ class Publisher:
             "revision": release.revision,
             "created_at": payload["created_at"],
             "templates": entries,
+            "items": payload.get("items", []),
             "replace_ids": payload["mappings"],
             "match_thresholds": payload["match_thresholds"],
             "mappings_url": f"{self.config.public_base}/releases/{release.revision}/mappings.json",
@@ -350,6 +351,13 @@ class Publisher:
             prior = session.get(Release, state.revision) if state.revision else None
             previous = {mapping["unknown_id"]: mapping for mapping in prior.payload["mappings"]} if prior else {}
             changed = [mapping for mapping in row.payload["mappings"] if previous.get(mapping["unknown_id"]) != mapping]
+            prior_items = {item["id"]: item for item in prior.payload.get("items", [])} if prior else {}
+            changed_items = [item for item in row.payload.get("items", []) if prior_items.get(item["id"]) != item]
+            for item in row.payload.get("approved_items", []):
+                session.merge(ItemDefinition(
+                    item_id=item["id"], name=item["name"],
+                    item_metadata={key: value for key, value in item.items() if key not in {"id", "name"}},
+                ))
             for mapping in row.payload["mappings"]:
                 session.merge(Mapping(**mapping, revision=row.revision))
             for mapping in row.payload["approved"]:
@@ -361,7 +369,9 @@ class Publisher:
                 )
                 identity.kind = "formal"
                 draft = session.get(MappingDraft, mapping["unknown_id"])
-                if draft and fields(draft, "unknown_id", "item_id", "name", "tag") == mapping:
+                published_item = next((item for item in row.payload.get("items", []) if item["id"] == mapping["item_id"]), None)
+                published_metadata = {key: value for key, value in published_item.items() if key not in {"id", "name"}} if published_item else None
+                if draft and fields(draft, "unknown_id", "item_id", "name", "tag") == mapping and (draft.item_metadata is None or draft.item_metadata == published_metadata):
                     session.delete(draft)
             state.revision = row.revision
             state.published_generation = row.generation
@@ -374,6 +384,7 @@ class Publisher:
                     "revision": row.revision,
                     # Replicate changed aliases, including U-ID consolidation and later formalization.
                     "replace_ids": changed,
+                    "items": changed_items,
                     "template_count": len(row.payload["templates"]),
                     "manifest_url": f"{self.config.public_base}/releases/{row.revision}/manifest.json",
                 },

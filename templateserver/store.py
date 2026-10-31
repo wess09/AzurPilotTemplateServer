@@ -10,6 +10,7 @@ from .imaging import THRESHOLDS, Icon, match_icon
 from .models import (
     CoordinationLock,
     IconImage,
+    ItemDefinition,
     Mapping,
     MappingDraft,
     OutboxEvent,
@@ -28,6 +29,10 @@ def utcnow():
 
 def fields(row, *names):
     return {name: getattr(row, name) for name in names}
+
+
+def draft_fields(row):
+    return {**fields(row, "unknown_id", "item_id", "name", "tag"), "metadata": row.item_metadata}
 
 
 class DomainError(Exception):
@@ -142,6 +147,15 @@ class Store:
                 select(func.count()).select_from(IconImage).where(IconImage.identity_id == identity.id)
             )
             state = session.get(State, 1)
+            if formal:
+                if identity.name != formal["name"] or identity.tag != formal.get("tag", ""):
+                    identity.name, identity.tag = formal["name"], formal.get("tag", "")
+                    state.generation += 1
+                if formal.get("metadata") is not None:
+                    definition = session.get(ItemDefinition, formal["item_id"])
+                    if definition is None or definition.name != formal["name"] or definition.item_metadata != formal["metadata"]:
+                        session.merge(ItemDefinition(item_id=formal["item_id"], name=formal["name"], item_metadata=formal["metadata"]))
+                        state.generation += 1
             if image is None and (formal is not None or count < 8):
                 session.add(
                     IconImage(
@@ -185,7 +199,10 @@ class Store:
             )
             for member in members:
                 if member.id.startswith("U-"):
-                    session.merge(MappingDraft(unknown_id=member.id, updated_at=utcnow(), **body))
+                    session.merge(MappingDraft(
+                        unknown_id=member.id, updated_at=utcnow(),
+                        item_metadata=body.get("metadata"), **{key: value for key, value in body.items() if key != "metadata"},
+                    ))
 
     def set_discarded(self, identity_id: str, discarded: bool):
         with self.session.begin() as session:
@@ -294,7 +311,7 @@ class Store:
             lock(session, 1)
             drafts = session.scalars(select(MappingDraft).order_by(MappingDraft.unknown_id))
             request = PublishRequest(
-                note=note, mappings=[fields(d, "unknown_id", "item_id", "name", "tag") for d in drafts]
+                note=note, mappings=[draft_fields(d) for d in drafts]
             )
             session.add(request)
             session.flush()
@@ -360,8 +377,10 @@ class Store:
                 item["hits"] = sum(member.hits for member in group)
                 item["last_seen"] = max(member.last_seen for member in group)
                 item["aliases"] = [member.id for member in group if member.id != row.id]
+                definition = session.get(ItemDefinition, row.canonical_id)
+                item["metadata"] = definition.item_metadata if definition else None
                 draft = session.scalar(select(MappingDraft).where(MappingDraft.unknown_id.in_(member_ids)).limit(1))
-                item["draft"] = fields(draft, "item_id", "name", "tag") if draft else None
+                item["draft"] = {**fields(draft, "item_id", "name", "tag"), "metadata": draft.item_metadata} if draft else None
                 image = session.scalar(
                     select(IconImage).where(IconImage.identity_id.in_(member_ids))
                     .order_by(IconImage.created_at, IconImage.sha256).limit(1)
@@ -378,6 +397,13 @@ class Store:
     def icon_png(self, sha256: str):
         with self.session() as session:
             return session.scalar(select(IconImage.png).where(IconImage.sha256 == sha256))
+
+    def items(self, limit: int, offset: int):
+        with self.session() as session:
+            return [
+                {"item_id": row.item_id, "name": row.name, "tag": "", "metadata": row.item_metadata}
+                for row in session.scalars(select(ItemDefinition).order_by(ItemDefinition.item_id).limit(limit).offset(offset))
+            ]
 
     def releases(self):
         with self.session() as session:
@@ -407,8 +433,10 @@ class Store:
 
 
 def snapshot(session: Session, approved: list[dict]) -> dict:
+    items = {row.item_id: {"id": row.item_id, "name": row.name, **row.item_metadata} for row in session.scalars(select(ItemDefinition))}
     identities = {row.id: row for row in session.scalars(select(TemplateIdentity))}
     overrides = {}
+    approved_items = {}
     for row in approved:
         identity = identities[row["unknown_id"]]
         if identity.discarded:
@@ -417,6 +445,9 @@ def snapshot(session: Session, approved: list[dict]) -> dict:
         if old and not fields_equal(old, row):
             raise DomainError("Merged templates have conflicting mapping drafts")
         overrides[identity.canonical_id] = row
+        if row.get("metadata"):
+            items[row["item_id"]] = {"id": row["item_id"], "name": row["name"], **row["metadata"]}
+            approved_items[row["item_id"]] = items[row["item_id"]]
     mappings, expanded = {}, []
     for identity in identities.values():
         override = overrides.get(identity.canonical_id)
@@ -458,11 +489,13 @@ def snapshot(session: Session, approved: list[dict]) -> dict:
         "templates": templates,
         "mappings": sorted(mappings.values(), key=lambda row: row["unknown_id"]),
         "approved": expanded,
+        "items": sorted(items.values(), key=lambda row: row["id"]),
+        "approved_items": list(approved_items.values()),
     }
 
 
 def fields_equal(left, right):
-    return all(left[key] == right[key] for key in ("item_id", "name", "tag"))
+    return all(left[key] == right[key] for key in ("item_id", "name", "tag")) and left.get("metadata") == right.get("metadata")
 
 
 def json_bytes(value) -> bytes:

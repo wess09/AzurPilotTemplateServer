@@ -92,6 +92,7 @@ class MappingDraft(Base):
     item_id: Mapped[str] = mapped_column(String(128))
     name: Mapped[str] = mapped_column(String(128))
     tag: Mapped[str] = mapped_column(String(32), default="")
+    item_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -104,6 +105,13 @@ class PublishRequest(Base):
     mappings: Mapped[list] = mapped_column(JSONB)
     processed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ItemDefinition(Base):
+    __tablename__ = "item_definitions"
+    item_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    item_metadata: Mapped[dict] = mapped_column(JSONB)
 
 
 class Release(Base):

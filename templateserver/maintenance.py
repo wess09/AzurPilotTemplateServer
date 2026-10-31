@@ -67,7 +67,7 @@ class Maintenance:
                 canonical = {identity.canonical_id for identity in members}
                 known = {identity.canonical_id for identity in members if identity.kind == "formal"}
                 pending = [drafts[identity.id] for identity in members if identity.id in drafts]
-                draft_values = {(draft.item_id, draft.name, draft.tag) for draft in pending}
+                draft_values = {(draft.item_id, draft.name, draft.tag, str(sorted((draft.item_metadata or {}).items()))) for draft in pending}
                 if len(canonical) < 2 or len(known) > 1 or len(draft_values) > 1:
                     continue
                 if known and pending and pending[0].item_id not in known:
@@ -81,6 +81,7 @@ class Maintenance:
                     if pending and identity.id.startswith("U-"):
                         session.merge(MappingDraft(
                             unknown_id=identity.id, updated_at=pending[0].updated_at,
+                            item_metadata=pending[0].item_metadata,
                             **fields(pending[0], "item_id", "name", "tag"),
                         ))
                 merged += len(canonical) - 1

@@ -133,8 +133,9 @@ Worker 部署包包含当前完整版本及最近最多 50 个历史版本目录
 | `state.get` / `state.subscribe` / `status.get` / `ping` | 空对象 |
 | `templates.list` | 可选 `kind` formal/temporary、`limit` 1–200 默认50、`offset` 默认0、`discarded` 默认 false |
 | `templates.discard` | `identity_id,discarded`；true 丢弃同组模板，false 恢复，自动排队发布 |
-| `templates.import` | `item_id,name,image_base64`，可选 `tag` |
-| `mappings.save` | `unknown_id,item_id,name`，可选 `tag` |
+| `items.list` | 可选 `limit` 1–200 默认200、`offset`；返回正式物品定义 |
+| `templates.import` | `item_id,name,image_base64`，可选 `tag,metadata` |
+| `mappings.save` | `unknown_id,item_id,name`，可选 `tag,metadata` |
 | `publish` | 可选 `note`，返回排队任务 ID |
 | `releases.list` | 空对象 |
 | `icons.get` | `sha256`，返回 base64 图标 |
@@ -142,6 +143,10 @@ Worker 部署包包含当前完整版本及最近最多 50 个历史版本目录
 | `screenshots.get` | `sha256`，可选 `offset` 字节偏移、`length` 最大192 KiB；返回 `data_base64,offset,total_size,media_type` |
 
 管理前端通过模板 WebSocket 分块读取原图，拼接后校验完整文件 SHA-256，支持位置标记、打开完整原图和下载 PNG。没有公开截图 GET 端点。
+
+`metadata` 包含 `category,rarity,series,version,unit,scenes,game_id,faction,subtype`。其中分类、单位和统计场景必填；`series=0` 表示通用或未指定，稀有度为 0–5，版本、游戏物品 ID、阵营、舰种或装备类型可留空。舰船科研蓝图区分彩色与金色，装备设计图区分彩色、金色与其他；单位必须与分类一致。旧调用可省略 metadata。`templates.list` 和 `items.list` 返回已保存的属性，草稿属性放在 `draft.metadata`。正式导入属性先保存在模板服务，人工映射属性随发布批准；只有部署成功后才向主服务同步。
+
+签名 manifest 的 `items` 保存累计物品定义，`release.published.payload.items` 只发送本次变化的定义，结构为 `id,name` 加上述 metadata 字段。物品定义不含图像，可独立于图标变体和丢弃状态供管理端选择。主服务公开 `/api/v3/get/items` 将已发布定义与内置游戏目录合并，供产物选择和分类统计使用。
 
 主服务单帧上限 64 KiB、每连接每秒10个命令/突发50、最多4个并行命令，单次最长100秒。模板服务单帧上限512 KiB、每连接每秒10个命令/突发50，顺序执行命令。状态变化通过连接推送，页面不做 HTTP 轮询。公开统计页面的 HTTP 请求不携带管理凭据。
 

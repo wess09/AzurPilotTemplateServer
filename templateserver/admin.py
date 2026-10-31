@@ -41,6 +41,11 @@ class DiscardTemplate(StrictModel):
     discarded: bool
 
 
+class ListItems(StrictModel):
+    limit: int = Field(default=200, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
 class SaveMapping(MappingBody):
     unknown_id: str = Field(min_length=3, max_length=128)
 
@@ -83,6 +88,9 @@ class AdminSocket:
         if method == "templates.list":
             body = ListTemplates.model_validate(params)
             return {"items": self.store.templates(body.kind, body.limit, body.offset, body.discarded)}
+        if method == "items.list":
+            body = ListItems.model_validate(params)
+            return {"items": self.store.items(body.limit, body.offset)}
         if method == "templates.discard":
             body = DiscardTemplate.model_validate(params)
             return self.store.set_discarded(body.identity_id, body.discarded)
