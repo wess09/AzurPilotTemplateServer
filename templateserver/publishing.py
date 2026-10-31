@@ -181,21 +181,26 @@ class Publisher:
                 envelope({"revision": release.revision, "replace_ids": payload["mappings"]}, self.key)
             ),
         )
+        public_entries = {template_key(entry): entry for entry in entries}
+
+        def write_delta(before, from_revision):
+            change = delta(before, payload, release.revision, from_revision)
+            change["upserts"] = [public_entries[template_key(entry)] for entry in change["upserts"]]
+            atomic_write(
+                directory / "deltas" / f"{from_revision}.json", json_bytes(envelope(change, self.key))
+            )
+
+        write_delta({}, 0)
         with self.store.session() as session:
             previous = session.scalars(
                 select(Release)
                 .where(Release.status == "deployed")
                 .order_by(Release.revision.desc())
                 .limit(RELEASE_HISTORY_LIMIT)
-            ).all()
-        public_entries = {template_key(entry): entry for entry in entries}
-        for prior in [None, *previous]:
-            from_revision = prior.revision if prior else 0
-            change = delta(prior.payload if prior else {}, payload, release.revision, from_revision)
-            change["upserts"] = [public_entries[template_key(entry)] for entry in change["upserts"]]
-            atomic_write(
-                directory / "deltas" / f"{from_revision}.json", json_bytes(envelope(change, self.key))
+                .execution_options(yield_per=1)
             )
+            for prior in previous:
+                write_delta(prior.payload, prior.revision)
         latest = {
             "revision": release.revision,
             "manifest_url": f"{self.config.public_base}/releases/{release.revision}/manifest.json",

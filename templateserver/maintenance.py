@@ -55,8 +55,7 @@ class Maintenance:
 
         merged, groups = 0, 0
         with self.store.session.begin() as session:
-            if lock(session, 1, skip_locked=True) is None:
-                return {"merged": 0, "groups": 0, "busy": True}
+            lock(session, 1)
             identities = list(session.scalars(select(TemplateIdentity).order_by(TemplateIdentity.created_at, TemplateIdentity.id)))
             drafts = {draft.unknown_id: draft for draft in session.scalars(select(MappingDraft))}
             for component in components:

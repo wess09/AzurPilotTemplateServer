@@ -4,7 +4,7 @@ import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, func, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, load_only, sessionmaker
 
 from .imaging import THRESHOLDS, Icon, match_icon
 from .models import (
@@ -281,7 +281,11 @@ class Store:
             state["last_delivery"] = (
                 fields(event, "sequence", "acknowledged_at", "last_error", "attempts") if event else None
             )
-            release = session.scalar(select(Release).order_by(Release.revision.desc()).limit(1))
+            release = session.scalar(
+                select(Release).options(load_only(
+                    Release.revision, Release.status, Release.error, Release.created_at, Release.deployed_at,
+                )).order_by(Release.revision.desc()).limit(1)
+            )
             state["release"] = (
                 fields(release, "revision", "status", "error", "created_at", "deployed_at")
                 if release
@@ -333,7 +337,12 @@ class Store:
         with self.session() as session:
             return [
                 fields(row, "revision", "status", "request_id", "note", "error", "created_at", "deployed_at")
-                for row in session.scalars(select(Release).order_by(Release.revision.desc()).limit(100))
+                for row in session.scalars(
+                    select(Release).options(load_only(
+                        Release.revision, Release.status, Release.request_id, Release.note,
+                        Release.error, Release.created_at, Release.deployed_at,
+                    )).order_by(Release.revision.desc()).limit(100)
+                )
             ]
 
     def events(self, after: int):
