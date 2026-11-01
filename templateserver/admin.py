@@ -14,7 +14,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import Field, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
-from .schemas import FormalUpload, MappingBody, PublishBody, StrictModel
+from .schemas import FormalUpload, MappingBody, PublishBody, SaveItem, StrictModel
 from .store import DomainError
 
 
@@ -91,6 +91,9 @@ class AdminSocket:
         if method == "items.list":
             body = ListItems.model_validate(params)
             return {"items": self.store.items(body.limit, body.offset)}
+        if method == "items.save":
+            body = SaveItem.model_validate(params)
+            return self.store.save_item(body.model_dump(exclude={"tag"}))
         if method == "templates.discard":
             body = DiscardTemplate.model_validate(params)
             return self.store.set_discarded(body.identity_id, body.discarded)

@@ -186,6 +186,18 @@ class Store:
                 "publication_pending": state.generation > state.published_generation,
             }
 
+    def save_item(self, body: dict):
+        with self.session.begin() as session:
+            lock(session, 1)
+            state = session.get(State, 1)
+            definition = session.get(ItemDefinition, body["item_id"])
+            if definition is None or definition.name != body["name"] or definition.item_metadata != body["metadata"]:
+                session.merge(ItemDefinition(item_id=body["item_id"], name=body["name"], item_metadata=body["metadata"]))
+                for identity in session.scalars(select(TemplateIdentity).where(TemplateIdentity.canonical_id == body["item_id"])):
+                    identity.name = body["name"]
+                state.generation += 1
+            return {"saved": True, "publication_pending": state.generation > state.published_generation}
+
     def save_mapping(self, unknown_id: str, body: dict):
         with self.session.begin() as session:
             lock(session, 1)
@@ -446,8 +458,11 @@ def snapshot(session: Session, approved: list[dict]) -> dict:
             raise DomainError("Merged templates have conflicting mapping drafts")
         overrides[identity.canonical_id] = row
         if row.get("metadata"):
-            items[row["item_id"]] = {"id": row["item_id"], "name": row["name"], **row["metadata"]}
-            approved_items[row["item_id"]] = items[row["item_id"]]
+            definition = {"id": row["item_id"], "name": row["name"], **row["metadata"]}
+            if row["item_id"] in approved_items and approved_items[row["item_id"]] != definition:
+                raise DomainError("同一物品的映射草稿属性不一致，请统一后再发布")
+            items[row["item_id"]] = definition
+            approved_items[row["item_id"]] = definition
     mappings, expanded = {}, []
     for identity in identities.values():
         override = overrides.get(identity.canonical_id)

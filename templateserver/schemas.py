@@ -52,7 +52,7 @@ ITEM_UNITS = {
 
 class ItemMetadata(StrictModel):
     category: str = Field(min_length=1, max_length=32)
-    rarity: int = Field(default=0, ge=0, le=5)
+    rarity: int = Field(default=0, ge=0, le=9)
     series: int = Field(default=0, ge=0, le=100)
     version: str = Field(default="", max_length=64)
     unit: str = Field(min_length=1, max_length=16)
@@ -60,6 +60,9 @@ class ItemMetadata(StrictModel):
     game_id: str = Field(default="", max_length=64)
     faction: str = Field(default="", max_length=64)
     subtype: str = Field(default="", max_length=64)
+    ship_id: str = Field(default="", max_length=16, pattern=r"^(?:[0-9]{1,16})?$")
+    equipment_id: str = Field(default="", max_length=16, pattern=r"^(?:[0-9]{1,16})?$")
+    tier: str = Field(default="", max_length=8, pattern=r"^(?:T[0-9]{1,2})?$")
 
     @model_validator(mode="after")
     def coherent_category(self):
@@ -68,6 +71,12 @@ class ItemMetadata(StrictModel):
         expected = 5 if self.category.endswith("rainbow") else 4 if self.category.endswith("gold") else None
         if expected and self.rarity != expected:
             raise ValueError("蓝图分类与稀有度不匹配")
+        if self.category == "gear-other" and self.rarity >= 4:
+            raise ValueError("金色或彩色装备设计图必须选择对应分类")
+        if self.ship_id and not self.category.startswith("blueprint-"):
+            raise ValueError("仅舰船科研蓝图可关联舰船")
+        if self.equipment_id and not self.category.startswith("gear-"):
+            raise ValueError("仅装备设计图可关联装备")
         self.scenes = sorted(set(self.scenes))
         return self
 
@@ -95,6 +104,11 @@ class MappingBody(StrictModel):
 
 class FormalUpload(MappingBody):
     image_base64: str = Field(max_length=350_000)
+
+
+class SaveItem(MappingBody):
+    tag: Literal[""] = ""
+    metadata: ItemMetadata
 
 
 class PublishBody(StrictModel):
